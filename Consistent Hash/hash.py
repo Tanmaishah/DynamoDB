@@ -24,7 +24,7 @@ class HashRing:
         return self.nodes.get(node_id)    
     
     # Adding put method to store key-value pairs with replication
-    def put(self,key,value,N=3):
+    def put(self,key,value,N=3,W=2):
         preference_list=self.get_preference_list(key,N)
         if not preference_list:
             print(f"Error: No nodes available")
@@ -34,23 +34,30 @@ class HashRing:
             node=self.get_node_object(node_id)
             if node and node.put(key,value):
                 successful_puts+=1
-        return successful_puts
+        if successful_puts>=W:
+            return True
+        print(f"Error: Only {successful_puts} puts succeeded, required {W}")
+        return False
 
-    def get(self,key,N=3):
+    def get(self,key,N=3,R=2):
         preference_list=self.get_preference_list(key,N)
         if not preference_list:
             print(f"Error: No nodes available")
             return None
+        values=[]
         for node_id in preference_list:
             node=self.get_node_object(node_id)
             if node:
                 value=node.get(key)
                 if value is not None:
-                    print(f"Key '{key}' found in node '{node_id}'")
-                    return value
-        print(f"Key '{key}' not found in any of the preference nodes")
-        return None
-
+                    values.append(value)
+            if len(values)>=R:
+            
+            else:
+                print("Error: Not enough replicas found")
+                
+        # print(f"Key '{key}' not found in any of the preference nodes")
+        
     def get_node(self,key):
         key_hash=hash_string(key)
         

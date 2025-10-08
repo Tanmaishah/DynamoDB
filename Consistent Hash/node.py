@@ -19,12 +19,7 @@ class Node:
             del self.storage[key]
             return True
         return False
-    
-    def remove(self,key):
-        if key in self.storage:
-            del self.storage[key]
-            return True
-        return False
+
     
     def get_all_keys(self):
         return list(self.storage.keys())
