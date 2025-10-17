@@ -19,7 +19,6 @@ class Node:
             del self.storage[key]
             return True
         return False
-
     
     def get_all_keys(self):
         return list(self.storage.keys())

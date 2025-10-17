@@ -1,6 +1,6 @@
 import hashlib
 import bisect
-# from "./node.py" import Node
+from node import Node
 def hash_string(input_string:str)->int:
     return int(hashlib.md5(input_string.encode()).hexdigest(),16)
 class HashRing:
@@ -52,7 +52,11 @@ class HashRing:
                 if value is not None:
                     values.append(value)
             if len(values)>=R:
-            
+                if(len(set(values[:R]))==1):
+                    return values[0]
+                else:
+                    print("Error: Data inconsistency detected among replicas")
+                    return None
             else:
                 print("Error: Not enough replicas found")
                 
@@ -113,7 +117,7 @@ if __name__ == "__main__":
     ring.add_node("node_D", capacity=200)
     ring.add_node("node_E", capacity=50)
 
-    test_keys = ["cart_123", "user_456", "session_789", "order_101", "product_202", "item_303", "category_404", "review_505", "wishlist_606", "coupon_707"]
+    # test_keys = ["cart_123", "user_456", "session_789", "order_101", "product_202", "item_303", "category_404", "review_505", "wishlist_606", "coupon_707"]
 
 # distribution test
     # for key in test_keys:
@@ -135,7 +139,30 @@ if __name__ == "__main__":
     #         expected = (capacity / 350) * 100
     #         print(f"{node_id}: {percentage:.1f}% (expected {expected:.1f}%)")
     
-    print("\n--- Preference Lists ---")
-    for key in ["cart_123", "user_456", "session_789"]:
-        pref = ring.get_preference_list(key, N=3)
-        print(f"Key '{key}' → replicas: {pref}")
+    # print("\n--- Preference Lists ---")
+    # for key in ["cart_123", "user_456", "session_789"]:
+    #     pref = ring.get_preference_list(key, N=3)
+    #     print(f"Key '{key}' → replicas: {pref}")
+
+    #Test
+    print("\n--- Put and Get Operations ---")
+    while(True):
+        operation=input("Enter operation (put/get/exit): ").strip().lower()
+        if operation=="exit":
+            break
+        key=input("Enter key: ").strip()
+        if operation=="put":
+            value=input("Enter value: ").strip()
+            success=ring.put(key,value,N=3,W=2)
+            if success:
+                print(f"Successfully put key '{key}' with value '{value}'")
+            else:
+                print(f"Failed to put key '{key}'")
+        elif operation=="get":
+            value=ring.get(key,N=3,R=2)
+            if value is not None:
+                print(f"Got value '{value}' for key '{key}'")
+            else:
+                print(f"Key '{key}' not found or inconsistent data")
+        else:
+            print("Invalid operation. Please enter 'put', 'get', or 'exit'.")
