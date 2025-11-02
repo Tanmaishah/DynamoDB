@@ -27,7 +27,7 @@ if _version_not_supported:
 
 class DynamoServiceStub(object):
     """============================================
-    Service Definition
+    Service Definitions
     ============================================
 
     """
@@ -52,7 +52,7 @@ class DynamoServiceStub(object):
 
 class DynamoServiceServicer(object):
     """============================================
-    Service Definition
+    Service Definitions
     ============================================
 
     """
@@ -92,7 +92,7 @@ def add_DynamoServiceServicer_to_server(servicer, server):
  # This class is part of an EXPERIMENTAL API.
 class DynamoService(object):
     """============================================
-    Service Definition
+    Service Definitions
     ============================================
 
     """

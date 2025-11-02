@@ -24,37 +24,45 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x64ynamo.proto\x12\x06\x64ynamo\">\n\x08NodeInfo\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\"A\n\x0bJoinRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\"J\n\x0cJoinResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12)\n\x0f\x63luster_members\x18\x02 \x03(\x0b\x32\x10.dynamo.NodeInfo\"(\n\nPutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"\x1e\n\x0bPutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"\x19\n\nGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"+\n\x0bGetResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x0b\n\x03key\x18\x02 \x01(\t\"1\n\x13ReplicatePutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"\'\n\x14ReplicatePutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"\"\n\x13ReplicateGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"4\n\x14ReplicateGetResponse\x12\r\n\x05\x66ound\x18\x01 \x01(\x08\x12\r\n\x05value\x18\x02 \x01(\t2o\n\rDynamoService\x12.\n\x03Put\x12\x12.dynamo.PutRequest\x1a\x13.dynamo.PutResponse\x12.\n\x03Get\x12\x12.dynamo.GetRequest\x1a\x13.dynamo.GetResponse2\xd6\x01\n\x0bNodeService\x12\x31\n\x04Join\x12\x13.dynamo.JoinRequest\x1a\x14.dynamo.JoinResponse\x12I\n\x0cReplicateGet\x12\x1b.dynamo.ReplicateGetRequest\x1a\x1c.dynamo.ReplicateGetResponse\x12I\n\x0cReplicatePut\x12\x1b.dynamo.ReplicatePutRequest\x1a\x1c.dynamo.ReplicatePutResponseb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x64ynamo.proto\x12\x06\x64ynamo\">\n\x08NodeInfo\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\"A\n\x0bJoinRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\"J\n\x0cJoinResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12)\n\x0f\x63luster_members\x18\x02 \x03(\x0b\x32\x10.dynamo.NodeInfo\"j\n\x0bVectorClock\x12-\n\x05\x63lock\x18\x01 \x03(\x0b\x32\x1e.dynamo.VectorClock.ClockEntry\x1a,\n\nClockEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"N\n\nPutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12$\n\x07\x63ontext\x18\x03 \x01(\x0b\x32\x13.dynamo.VectorClock\"J\n\x0bPutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12*\n\rupdated_clock\x18\x02 \x01(\x0b\x32\x13.dynamo.VectorClock\"\x19\n\nGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"J\n\x0eVersionedValue\x12\r\n\x05value\x18\x01 \x01(\t\x12)\n\x0cvector_clock\x18\x02 \x01(\x0b\x32\x13.dynamo.VectorClock\"D\n\x0bGetResponse\x12\r\n\x05\x66ound\x18\x01 \x01(\x08\x12&\n\x06values\x18\x02 \x03(\x0b\x32\x16.dynamo.VersionedValue\"\\\n\x13ReplicatePutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12)\n\x0cvector_clock\x18\x03 \x01(\x0b\x32\x13.dynamo.VectorClock\"\'\n\x14ReplicatePutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"\"\n\x13ReplicateGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"M\n\x14ReplicateGetResponse\x12\r\n\x05\x66ound\x18\x01 \x01(\x08\x12&\n\x06values\x18\x02 \x03(\x0b\x32\x16.dynamo.VersionedValue2o\n\rDynamoService\x12.\n\x03Put\x12\x12.dynamo.PutRequest\x1a\x13.dynamo.PutResponse\x12.\n\x03Get\x12\x12.dynamo.GetRequest\x1a\x13.dynamo.GetResponse2\xd6\x01\n\x0bNodeService\x12\x31\n\x04Join\x12\x13.dynamo.JoinRequest\x1a\x14.dynamo.JoinResponse\x12I\n\x0cReplicateGet\x12\x1b.dynamo.ReplicateGetRequest\x1a\x1c.dynamo.ReplicateGetResponse\x12I\n\x0cReplicatePut\x12\x1b.dynamo.ReplicatePutRequest\x1a\x1c.dynamo.ReplicatePutResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'dynamo_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
+  _globals['_VECTORCLOCK_CLOCKENTRY']._loaded_options = None
+  _globals['_VECTORCLOCK_CLOCKENTRY']._serialized_options = b'8\001'
   _globals['_NODEINFO']._serialized_start=24
   _globals['_NODEINFO']._serialized_end=86
   _globals['_JOINREQUEST']._serialized_start=88
   _globals['_JOINREQUEST']._serialized_end=153
   _globals['_JOINRESPONSE']._serialized_start=155
   _globals['_JOINRESPONSE']._serialized_end=229
-  _globals['_PUTREQUEST']._serialized_start=231
-  _globals['_PUTREQUEST']._serialized_end=271
-  _globals['_PUTRESPONSE']._serialized_start=273
-  _globals['_PUTRESPONSE']._serialized_end=303
-  _globals['_GETREQUEST']._serialized_start=305
-  _globals['_GETREQUEST']._serialized_end=330
-  _globals['_GETRESPONSE']._serialized_start=332
-  _globals['_GETRESPONSE']._serialized_end=375
-  _globals['_REPLICATEPUTREQUEST']._serialized_start=377
-  _globals['_REPLICATEPUTREQUEST']._serialized_end=426
-  _globals['_REPLICATEPUTRESPONSE']._serialized_start=428
-  _globals['_REPLICATEPUTRESPONSE']._serialized_end=467
-  _globals['_REPLICATEGETREQUEST']._serialized_start=469
-  _globals['_REPLICATEGETREQUEST']._serialized_end=503
-  _globals['_REPLICATEGETRESPONSE']._serialized_start=505
-  _globals['_REPLICATEGETRESPONSE']._serialized_end=557
-  _globals['_DYNAMOSERVICE']._serialized_start=559
-  _globals['_DYNAMOSERVICE']._serialized_end=670
-  _globals['_NODESERVICE']._serialized_start=673
-  _globals['_NODESERVICE']._serialized_end=887
+  _globals['_VECTORCLOCK']._serialized_start=231
+  _globals['_VECTORCLOCK']._serialized_end=337
+  _globals['_VECTORCLOCK_CLOCKENTRY']._serialized_start=293
+  _globals['_VECTORCLOCK_CLOCKENTRY']._serialized_end=337
+  _globals['_PUTREQUEST']._serialized_start=339
+  _globals['_PUTREQUEST']._serialized_end=417
+  _globals['_PUTRESPONSE']._serialized_start=419
+  _globals['_PUTRESPONSE']._serialized_end=493
+  _globals['_GETREQUEST']._serialized_start=495
+  _globals['_GETREQUEST']._serialized_end=520
+  _globals['_VERSIONEDVALUE']._serialized_start=522
+  _globals['_VERSIONEDVALUE']._serialized_end=596
+  _globals['_GETRESPONSE']._serialized_start=598
+  _globals['_GETRESPONSE']._serialized_end=666
+  _globals['_REPLICATEPUTREQUEST']._serialized_start=668
+  _globals['_REPLICATEPUTREQUEST']._serialized_end=760
+  _globals['_REPLICATEPUTRESPONSE']._serialized_start=762
+  _globals['_REPLICATEPUTRESPONSE']._serialized_end=801
+  _globals['_REPLICATEGETREQUEST']._serialized_start=803
+  _globals['_REPLICATEGETREQUEST']._serialized_end=837
+  _globals['_REPLICATEGETRESPONSE']._serialized_start=839
+  _globals['_REPLICATEGETRESPONSE']._serialized_end=916
+  _globals['_DYNAMOSERVICE']._serialized_start=918
+  _globals['_DYNAMOSERVICE']._serialized_end=1029
+  _globals['_NODESERVICE']._serialized_start=1032
+  _globals['_NODESERVICE']._serialized_end=1246
 # @@protoc_insertion_point(module_scope)

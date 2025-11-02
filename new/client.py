@@ -4,22 +4,43 @@ import dynamo_pb2_grpc
 import sys
 
 
-def put(address, key, value):
-    """Send PUT request to a node."""
+# Store vector clocks for keys (simulating client-side context)
+client_context = {}  # key -> VectorClock
+
+
+def put(address, key, value, context=None):
+    """
+    Send PUT request to a node.
+    
+    Args:
+        address: Node address
+        key: Key to store
+        value: Value to store
+        context: Optional VectorClock (from previous GET)
+    """
     try:
         channel = grpc.insecure_channel(address)
         stub = dynamo_pb2_grpc.DynamoServiceStub(channel)
         
+        # Build request with optional context
         request = dynamo_pb2.PutRequest(key=key, value=value)
+        if context:
+            request.context.CopyFrom(context)
+        
         response = stub.Put(request, timeout=5)
         
         if response.success:
             print(f"✓ PUT successful: {key} = {value}")
+            # Store updated vector clock for future PUTs
+            if response.updated_clock:
+                client_context[key] = response.updated_clock
+                print(f"  Updated context: {dict(response.updated_clock.clock)}")
+            return True
         else:
             print(f"✗ PUT failed: {key} = {value}")
+            return False
         
         channel.close()
-        return response.success
         
     except Exception as e:
         print(f"✗ Error: {e}")
@@ -27,7 +48,10 @@ def put(address, key, value):
 
 
 def get(address, key):
-    """Send GET request to a node."""
+    """
+    Send GET request to a node.
+    May return multiple values if there's a conflict.
+    """
     try:
         channel = grpc.insecure_channel(address)
         stub = dynamo_pb2_grpc.DynamoServiceStub(channel)
@@ -36,8 +60,27 @@ def get(address, key):
         response = stub.Get(request, timeout=5)
         
         if response.found:
-            print(f"✓ GET successful: {key} = {response.value}")
-            return response.value
+            if len(response.values) == 1:
+                # No conflict
+                v = response.values[0]
+                print(f"✓ GET successful: {key} = {v.value}")
+                print(f"  Vector clock: {dict(v.vector_clock.clock)}")
+                
+                # Store vector clock for future PUTs
+                client_context[key] = v.vector_clock
+                
+                return v.value
+            else:
+                # Conflict! Multiple versions
+                print(f"⚠ CONFLICT: {len(response.values)} versions found for '{key}':")
+                for i, v in enumerate(response.values):
+                    print(f"  [{i+1}] {v.value} (VC: {dict(v.vector_clock.clock)})")
+                
+                # Ask user to resolve
+                print("\nTo resolve conflict, use: resolve <key> <value>")
+                print("This will write the chosen value with merged context.")
+                
+                return None
         else:
             print(f"✗ Key not found: {key}")
             return None
@@ -49,15 +92,30 @@ def get(address, key):
         return None
 
 
+def resolve_conflict(address, key, chosen_value):
+    """
+    Resolve a conflict by writing the chosen value with merged context.
+    """
+    if key not in client_context:
+        print(f"✗ No context for key '{key}'. Do a GET first.")
+        return
+    
+    print(f"Resolving conflict for '{key}' with value '{chosen_value}'")
+    put(address, key, chosen_value, client_context[key])
+
+
 def interactive_mode(address):
     """Interactive client for testing."""
     print(f"\n{'='*60}")
-    print(f"DynamoDB Client - Connected to {address}")
+    print(f"DynamoDB Client with Vector Clocks")
+    print(f"Connected to {address}")
     print(f"{'='*60}")
     print("Commands:")
-    print("  put <key> <value>  - Store a key-value pair")
-    print("  get <key>          - Retrieve a value")
-    print("  quit               - Exit")
+    print("  put <key> <value>       - Store a key-value pair")
+    print("  get <key>               - Retrieve a value")
+    print("  resolve <key> <value>   - Resolve conflict with chosen value")
+    print("  context                 - Show stored contexts")
+    print("  quit                    - Exit")
     print(f"{'='*60}\n")
     
     while True:
@@ -78,8 +136,11 @@ def interactive_mode(address):
                     print("Usage: put <key> <value>")
                     continue
                 key = cmd[1]
-                value = " ".join(cmd[2:])  # Allow values with spaces
-                put(address, key, value)
+                value = " ".join(cmd[2:])
+                
+                # Use stored context if available
+                context = client_context.get(key)
+                put(address, key, value, context)
             
             elif operation == "get":
                 if len(cmd) < 2:
@@ -87,6 +148,22 @@ def interactive_mode(address):
                     continue
                 key = cmd[1]
                 get(address, key)
+            
+            elif operation == "resolve":
+                if len(cmd) < 3:
+                    print("Usage: resolve <key> <value>")
+                    continue
+                key = cmd[1]
+                value = " ".join(cmd[2:])
+                resolve_conflict(address, key, value)
+            
+            elif operation == "context":
+                if client_context:
+                    print("Stored contexts:")
+                    for k, vc in client_context.items():
+                        print(f"  {k}: {dict(vc.clock)}")
+                else:
+                    print("No contexts stored yet")
             
             else:
                 print(f"Unknown command: {operation}")
