@@ -5,6 +5,9 @@ import grpc
 import dynamo_pb2
 import dynamo_pb2_grpc
 from vector_clock import VectorClock, VersionedValue, resolve_conflicts
+import threading
+import time
+import random
 
 
 def hash_string(input_string: str) -> int:
@@ -90,6 +93,23 @@ class Node:
         self.N = 3  # replication factor
         self.R = 2  # read quorum
         self.W = 2  # write quorum
+
+        # Gossip protocol state
+        self.member_state = {}  # node_id -> {'capacity': int, 'address': str, 'heartbeat': timestamp, 'version': int}
+        self.FAILURE_THRESHOLD_MS = 10000  # 10 seconds without gossip = suspected failure
+        self.GOSSIP_INTERVAL_S = 1  # Gossip every 1 second
+        self.gossip_lock = threading.Lock()
+        self.gossip_thread = None
+        self.running = False
+
+        # Initialize self in member state
+        self.member_state[self.node_id] = {
+            'capacity': self.capacity,
+            'address': self.address,
+            'heartbeat': int(time.time() * 1000),
+            'version': 0
+        }
+
         self.ring.add_node(self.node_id, self.capacity, self.address)
     
     def start(self, seed_address=None):
@@ -113,16 +133,27 @@ class Node:
         if seed_address and seed_address != self.address:
             print(f"Joining ring via seed node at {seed_address}")
             self.send_join_request(seed_address)
-    
+
+        # Start gossip thread
+        self.running = True
+        self.gossip_thread = threading.Thread(target=self._gossip_loop, daemon=True)
+        self.gossip_thread.start()
+        print(f"✓ Gossip protocol started")
+
     def stop(self, address=None):
         """Stop the node gracefully."""
         if address is None:
             address = self.address
         print(f"Node {self.node_id} at {address} stopping...")
-        
+
+        # Stop gossip thread
+        self.running = False
+        if self.gossip_thread:
+            self.gossip_thread.join(timeout=2)
+
         if self.server:
             self.server.stop(grace=2)
-        
+
         print(f"Node {self.node_id} has left the ring.")
     
     # ============================================
@@ -144,6 +175,15 @@ class Node:
                 for member in response.cluster_members:
                     if member.node_id != self.node_id:
                         self.ring.add_node(member.node_id, member.capacity, member.address)
+                        # Add to member state for gossip
+                        with self.gossip_lock:
+                            if member.node_id not in self.member_state:
+                                self.member_state[member.node_id] = {
+                                    'capacity': member.capacity,
+                                    'address': member.address,
+                                    'heartbeat': int(time.time() * 1000),
+                                    'version': 0
+                                }
                 print("Current ring members after join:")
                 self.ring.print_ring()
             else:
@@ -155,7 +195,17 @@ class Node:
     def handle_join_request(self, node_id: str, capacity: int, address: str):
         self.ring.add_node(node_id, capacity, address)
         print(f"✓ Node {node_id} joined the ring.")
-        
+
+        # Add to member state for gossip
+        with self.gossip_lock:
+            if node_id not in self.member_state:
+                self.member_state[node_id] = {
+                    'capacity': capacity,
+                    'address': address,
+                    'heartbeat': int(time.time() * 1000),
+                    'version': 0
+                }
+
         # Fixed: Create NodeInfo protobuf objects, not dicts
         cluster_members = []
         for n, info in self.ring.nodes.items():
@@ -166,7 +216,7 @@ class Node:
                     address=info['address']
                 )
             )
-        
+
         return dynamo_pb2.JoinResponse(
             success=True,
             cluster_members=cluster_members
@@ -364,6 +414,160 @@ class Node:
         """Handle internal GET replication request. Returns list of versions."""
         return self.local_get(key)
 
+    # ============================================
+    # Gossip Protocol Implementation
+    # ============================================
+
+    def _gossip_loop(self):
+        """Background thread that periodically sends gossip to random nodes."""
+        print(f"[GOSSIP] Starting gossip loop for node {self.node_id}")
+
+        while self.running:
+            try:
+                # Update own heartbeat
+                with self.gossip_lock:
+                    self.member_state[self.node_id]['heartbeat'] = int(time.time() * 1000)
+
+                # Get list of other known nodes
+                with self.gossip_lock:
+                    other_nodes = [
+                        (nid, info) for nid, info in self.member_state.items()
+                        if nid != self.node_id
+                    ]
+
+                # Send gossip to random node if any exist
+                if other_nodes:
+                    target_id, target_info = random.choice(other_nodes)
+                    self._send_gossip(target_id, target_info['address'])
+
+                # Check for failures
+                self._detect_failures()
+
+                # Sleep before next gossip round
+                time.sleep(self.GOSSIP_INTERVAL_S)
+
+            except Exception as e:
+                print(f"[GOSSIP] Error in gossip loop: {e}")
+                time.sleep(self.GOSSIP_INTERVAL_S)
+
+    def _send_gossip(self, target_id: str, target_address: str):
+        """Send gossip message to a specific node."""
+        try:
+            # Prepare member states to send
+            with self.gossip_lock:
+                members_to_send = []
+                for node_id, info in self.member_state.items():
+                    member_proto = dynamo_pb2.MemberState(
+                        node_id=node_id,
+                        capacity=info['capacity'],
+                        address=info['address'],
+                        heartbeat=info['heartbeat'],
+                        version=info['version']
+                    )
+                    members_to_send.append(member_proto)
+
+            # Send gossip via gRPC
+            channel = grpc.insecure_channel(target_address)
+            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+
+            request = dynamo_pb2.GossipMessage(
+                sender_id=self.node_id,
+                members=members_to_send
+            )
+
+            response = stub.Gossip(request, timeout=2)
+
+            # Merge received member states
+            if response.success:
+                self._merge_member_states(response.members)
+
+            channel.close()
+
+        except Exception as e:
+            # Gossip failures are expected (nodes may be down)
+            pass
+
+    def _merge_member_states(self, received_members):
+        """Merge received member states with local view."""
+        with self.gossip_lock:
+            for member in received_members:
+                node_id = member.node_id
+
+                # If new node, add to member state
+                if node_id not in self.member_state:
+                    self.member_state[node_id] = {
+                        'capacity': member.capacity,
+                        'address': member.address,
+                        'heartbeat': member.heartbeat,
+                        'version': member.version
+                    }
+                    # Add to ring
+                    if node_id not in self.ring.nodes:
+                        self.ring.add_node(node_id, member.capacity, member.address)
+                    print(f"[GOSSIP] Discovered new node {node_id} via gossip")
+
+                else:
+                    # Update if received version is newer
+                    local_version = self.member_state[node_id]['version']
+                    if member.version > local_version or member.heartbeat > self.member_state[node_id]['heartbeat']:
+                        self.member_state[node_id]['heartbeat'] = max(
+                            member.heartbeat,
+                            self.member_state[node_id]['heartbeat']
+                        )
+                        self.member_state[node_id]['version'] = max(
+                            member.version,
+                            local_version
+                        )
+
+    def _detect_failures(self):
+        """Detect failed nodes based on heartbeat timeout."""
+        current_time = int(time.time() * 1000)
+        failed_nodes = []
+
+        with self.gossip_lock:
+            for node_id, info in list(self.member_state.items()):
+                if node_id == self.node_id:
+                    continue
+
+                time_since_heartbeat = current_time - info['heartbeat']
+                if time_since_heartbeat > self.FAILURE_THRESHOLD_MS:
+                    failed_nodes.append(node_id)
+
+        # Remove failed nodes
+        for node_id in failed_nodes:
+            self._remove_failed_node(node_id)
+
+    def _remove_failed_node(self, node_id: str):
+        """Remove a failed node from the cluster."""
+        with self.gossip_lock:
+            if node_id in self.member_state:
+                del self.member_state[node_id]
+                print(f"[GOSSIP] Detected failure of node {node_id}, removing from cluster")
+
+        # Remove from ring
+        if node_id in self.ring.nodes:
+            self.ring.remove_node(node_id)
+
+    def handle_gossip(self, sender_id: str, received_members):
+        """Handle incoming gossip message."""
+        # Merge received states
+        self._merge_member_states(received_members)
+
+        # Prepare response with our view
+        with self.gossip_lock:
+            members_to_send = []
+            for node_id, info in self.member_state.items():
+                member_proto = dynamo_pb2.MemberState(
+                    node_id=node_id,
+                    capacity=info['capacity'],
+                    address=info['address'],
+                    heartbeat=info['heartbeat'],
+                    version=info['version']
+                )
+                members_to_send.append(member_proto)
+
+        return dynamo_pb2.GossipResponse(success=True, members=members_to_send)
+
 
 # ============================================
 # gRPC Service Implementations
@@ -408,6 +612,10 @@ class NodeServicer(dynamo_pb2_grpc.NodeServiceServicer):
             return dynamo_pb2.ReplicateGetResponse(found=True, values=values_proto)
         else:
             return dynamo_pb2.ReplicateGetResponse(found=False)
+
+    def Gossip(self, request, context):
+        """Handle GOSSIP request from another node."""
+        return self.node.handle_gossip(request.sender_id, request.members)
 
 
 class DynamoServicer(dynamo_pb2_grpc.DynamoServiceServicer):
