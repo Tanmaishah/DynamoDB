@@ -5,8 +5,8 @@ import grpc
 import dynamo_pb2
 import dynamo_pb2_grpc
 from vector_clock import VectorClock, VersionedValue, resolve_conflicts
-import threading
 import time
+import threading
 import random
 
 
@@ -17,52 +17,113 @@ def hash_string(input_string: str) -> int:
 
 class HashRing:
     def __init__(self, virtual_nodes=100):
-        self.nodes = {}  # of the form node -> {capacity, address}
+        self.nodes = {}  # of the form node -> {capacity, address, last_seen, is_alive}
         self.ring = []   # of the form (pos, node)
         self.virtual_nodes = virtual_nodes
+        self.lock = threading.RLock()  # Thread-safe for gossip updates
 
     def add_node(self, node: str, capacity: int, address: str):
-        if node in self.nodes:
-            raise ValueError("Node already exists")
-        self.nodes[node] = {
-            'capacity': capacity,
-            'address': address
-        }
-        vnodes = int((capacity / 100) * self.virtual_nodes)
-        for i in range(vnodes):
-            vnode = f"{node}{i}"
-            pos = hash_string(vnode)
-            self.ring.append((pos, node))
-        self.ring.sort(key=lambda x: x[0])
-        print(f"Added node {node} with {vnodes} virtual nodes")
+        with self.lock:
+            if node in self.nodes:
+                # Update existing node
+                self.nodes[node]['capacity'] = capacity
+                self.nodes[node]['address'] = address
+                self.nodes[node]['last_seen'] = time.time()
+                self.nodes[node]['is_alive'] = True
+                return
+            
+            self.nodes[node] = {
+                'capacity': capacity,
+                'address': address,
+                'last_seen': time.time(),
+                'is_alive': True
+            }
+            
+            vnodes = int((capacity / 100) * self.virtual_nodes)
+            for i in range(vnodes):
+                vnode = f"{node}{i}"
+                pos = hash_string(vnode)
+                self.ring.append((pos, node))
+            
+            self.ring.sort(key=lambda x: x[0])
+            print(f"Added node {node} with {vnodes} virtual nodes")
     
     def remove_node(self, node):
-        if node not in self.nodes:
-            raise ValueError("Node does not exist")
-        del self.nodes[node]
-        self.ring = [(pos, n) for pos, n in self.ring if n != node]
-        print(f"Removed node {node}")
+        with self.lock:
+            if node not in self.nodes:
+                raise ValueError("Node does not exist")
+            del self.nodes[node]
+            self.ring = [(pos, n) for pos, n in self.ring if n != node]
+            print(f"Removed node {node}")
+    
+    def mark_node_dead(self, node):
+        """Mark a node as dead (but don't remove from ring yet)."""
+        with self.lock:
+            if node in self.nodes:
+                was_alive = self.nodes[node]['is_alive']
+                self.nodes[node]['is_alive'] = False
+                if was_alive:  # Only print if state changed
+                    print(f"\n⚠️  [{time.strftime('%H:%M:%S')}] Node {node} marked as DEAD (no response for {self.FAILURE_THRESHOLD:.0f}s)")
+    
+    def mark_node_alive(self, node):
+        """Mark a node as alive and update last_seen."""
+        with self.lock:
+            if node in self.nodes:
+                was_dead = not self.nodes[node]['is_alive']
+                self.nodes[node]['is_alive'] = True
+                self.nodes[node]['last_seen'] = time.time()
+                if was_dead:  # Only print if state changed (recovery!)
+                    print(f"\n✅ [{time.strftime('%H:%M:%S')}] Node {node} is ALIVE again! (recovered)")
+    
+    def update_from_gossip(self, remote_view: dict):
+        """
+        Merge remote ring view with local view.
+        Take the most recent information for each node.
+        """
+        with self.lock:
+            for node_id, remote_info in remote_view.items():
+                if node_id not in self.nodes:
+                    # Learn about new node
+                    self.add_node(
+                        node_id,
+                        remote_info['capacity'],
+                        remote_info['address']
+                    )
+                    print(f"  [GOSSIP] Learned about new node: {node_id}")
+                else:
+                    # Update if remote info is newer
+                    local_info = self.nodes[node_id]
+                    if remote_info['last_seen'] > local_info['last_seen']:
+                        self.nodes[node_id].update(remote_info)
+                        print(f"  [GOSSIP] Updated {node_id} from gossip")
     
     def get_preference_list(self, key: str, N: int = 3):
-        """Get N unique nodes responsible for this key."""
-        if not self.ring:
-            return []
-        pos = hash_string(key)
-        positions = [p for p, _ in self.ring]
-        idx = bisect.bisect_right(positions, pos)
-        if idx == len(self.ring):
-            idx = 0
-        preference_list = []
-        seen = set()
-        attempts = 0
-        while len(preference_list) < N and attempts < len(self.ring):
-            curr_index = (idx + attempts) % len(self.ring)
-            node_id = self.ring[curr_index][1]
-            if node_id not in seen:
-                preference_list.append(node_id)
-                seen.add(node_id)
-            attempts += 1
-        return preference_list
+        """Get N unique ALIVE nodes responsible for this key."""
+        with self.lock:
+            if not self.ring:
+                return []
+            pos = hash_string(key)
+            positions = [p for p, _ in self.ring]
+            idx = bisect.bisect_right(positions, pos)
+            if idx == len(self.ring):
+                idx = 0
+            preference_list = []
+            seen = set()
+            attempts = 0
+            while len(preference_list) < N and attempts < len(self.ring):
+                curr_index = (idx + attempts) % len(self.ring)
+                node_id = self.ring[curr_index][1]
+                # Only add alive nodes
+                if node_id not in seen and self.nodes[node_id]['is_alive']:
+                    preference_list.append(node_id)
+                    seen.add(node_id)
+                attempts += 1
+            return preference_list
+    
+    def get_all_alive_nodes(self):
+        """Get list of all alive node IDs."""
+        with self.lock:
+            return [nid for nid, info in self.nodes.items() if info['is_alive']]
     
     def print_ring(self):
         """Print ring structure for debugging."""
@@ -93,27 +154,19 @@ class Node:
         self.N = 3  # replication factor
         self.R = 2  # read quorum
         self.W = 2  # write quorum
-
-        # Gossip protocol state
-        self.member_state = {}  # node_id -> {'capacity': int, 'address': str, 'heartbeat': timestamp, 'version': int}
-        self.FAILURE_THRESHOLD_MS = 10000  # 10 seconds without gossip = suspected failure
-        self.GOSSIP_INTERVAL_S = 1  # Gossip every 1 second
-        self.gossip_lock = threading.Lock()
+        
+        # Gossip configuration
+        self.GOSSIP_INTERVAL = 1.0  # seconds
+        self.FAILURE_THRESHOLD = 10.0  # seconds - mark dead if no response
         self.gossip_thread = None
         self.running = False
-
-        # Initialize self in member state
-        self.member_state[self.node_id] = {
-            'capacity': self.capacity,
-            'address': self.address,
-            'heartbeat': int(time.time() * 1000),
-            'version': 0
-        }
-
+        
         self.ring.add_node(self.node_id, self.capacity, self.address)
     
     def start(self, seed_address=None):
         """Start the gRPC server and optionally join via seed."""
+        self.running = True
+        
         # Start gRPC server
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
         
@@ -133,28 +186,131 @@ class Node:
         if seed_address and seed_address != self.address:
             print(f"Joining ring via seed node at {seed_address}")
             self.send_join_request(seed_address)
-
-        # Start gossip thread
-        self.running = True
-        self.gossip_thread = threading.Thread(target=self._gossip_loop, daemon=True)
+        
+        # Start gossip protocol
+        self.gossip_thread = threading.Thread(target=self.gossip_routine, daemon=True)
         self.gossip_thread.start()
         print(f"✓ Gossip protocol started")
-
+    
     def stop(self, address=None):
         """Stop the node gracefully."""
+        self.running = False
+        
         if address is None:
             address = self.address
         print(f"Node {self.node_id} at {address} stopping...")
-
-        # Stop gossip thread
-        self.running = False
-        if self.gossip_thread:
-            self.gossip_thread.join(timeout=2)
-
+        
         if self.server:
             self.server.stop(grace=2)
-
+        
         print(f"Node {self.node_id} has left the ring.")
+    
+    # ============================================
+    # Gossip Protocol
+    # ============================================
+    
+    def gossip_routine(self):
+        """
+        Periodic gossip protocol to maintain ring consistency.
+        Runs every GOSSIP_INTERVAL seconds.
+        """
+        print(f"[GOSSIP] Starting gossip routine for {self.node_id}")
+        
+        while self.running:
+            try:
+                # Get all alive peers (excluding self)
+                peers = self.ring.get_all_alive_nodes()
+                peers = [p for p in peers if p != self.node_id]
+                
+                if peers:
+                    # Pick a random peer to gossip with
+                    target = random.choice(peers)
+                    target_addr = self.ring.nodes[target]['address']
+                    
+                    print(f"[GOSSIP {self.node_id}] Pinging {target}...", end=" ", flush=True)
+                    
+                    # Build my ring view
+                    my_view = {}
+                    with self.ring.lock:
+                        for nid, info in self.ring.nodes.items():
+                            my_view[nid] = dynamo_pb2.NodeInfo(
+                                node_id=nid,
+                                capacity=info['capacity'],
+                                address=info['address'],
+                                last_seen=int(info['last_seen']),
+                                is_alive=info['is_alive']
+                            )
+                    
+                    # Send gossip ping
+                    channel = grpc.insecure_channel(target_addr)
+                    stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+                    
+                    request = dynamo_pb2.GossipPing(
+                        sender_id=self.node_id,
+                        ring_view=my_view
+                    )
+                    
+                    response = stub.Gossip(request, timeout=0.5)
+                    
+                    print(f"✓")  # Success
+                    
+                    # Merge their view
+                    remote_view = {}
+                    for nid, node_info in response.ring_view.items():
+                        remote_view[nid] = {
+                            'capacity': node_info.capacity,
+                            'address': node_info.address,
+                            'last_seen': node_info.last_seen,
+                            'is_alive': node_info.is_alive
+                        }
+                    
+                    self.ring.update_from_gossip(remote_view)
+                    self.ring.mark_node_alive(target)
+                    
+                    channel.close()
+                else:
+                    print(f"[GOSSIP {self.node_id}] No other nodes to gossip with")
+                
+                # Check for dead nodes (haven't heard from in FAILURE_THRESHOLD)
+                with self.ring.lock:
+                    current_time = time.time()
+                    for nid, info in self.ring.nodes.items():
+                        if nid != self.node_id and info['is_alive']:
+                            time_since_seen = current_time - info['last_seen']
+                            if time_since_seen > self.FAILURE_THRESHOLD:
+                                print(f"[GOSSIP {self.node_id}] Node {nid} unresponsive for {time_since_seen:.0f}s")
+                                self.ring.mark_node_dead(nid)
+                
+            except Exception as e:
+                # Gossip errors are expected when nodes are down
+                print(f"✗ (timeout/unreachable)")
+            
+            time.sleep(self.GOSSIP_INTERVAL)
+    
+    def handle_gossip_ping(self, sender_id: str, remote_view: dict):
+        """
+        Handle incoming gossip ping.
+        Merge sender's view and return our view.
+        """
+        print(f"[GOSSIP {self.node_id}] Received ping from {sender_id}")
+        
+        # Merge sender's view into our ring
+        self.ring.update_from_gossip(remote_view)
+        self.ring.mark_node_alive(sender_id)
+        
+        # Build our ring view to send back
+        my_view = {}
+        with self.ring.lock:
+            for nid, info in self.ring.nodes.items():
+                my_view[nid] = dynamo_pb2.NodeInfo(
+                    node_id=nid,
+                    capacity=info['capacity'],
+                    address=info['address'],
+                    last_seen=int(info['last_seen']),
+                    is_alive=info['is_alive']
+                )
+        
+        return dynamo_pb2.GossipPong(ring_view=my_view)
     
     # ============================================
     # JOIN Request Handling
@@ -175,15 +331,6 @@ class Node:
                 for member in response.cluster_members:
                     if member.node_id != self.node_id:
                         self.ring.add_node(member.node_id, member.capacity, member.address)
-                        # Add to member state for gossip
-                        with self.gossip_lock:
-                            if member.node_id not in self.member_state:
-                                self.member_state[member.node_id] = {
-                                    'capacity': member.capacity,
-                                    'address': member.address,
-                                    'heartbeat': int(time.time() * 1000),
-                                    'version': 0
-                                }
                 print("Current ring members after join:")
                 self.ring.print_ring()
             else:
@@ -195,17 +342,7 @@ class Node:
     def handle_join_request(self, node_id: str, capacity: int, address: str):
         self.ring.add_node(node_id, capacity, address)
         print(f"✓ Node {node_id} joined the ring.")
-
-        # Add to member state for gossip
-        with self.gossip_lock:
-            if node_id not in self.member_state:
-                self.member_state[node_id] = {
-                    'capacity': capacity,
-                    'address': address,
-                    'heartbeat': int(time.time() * 1000),
-                    'version': 0
-                }
-
+        
         # Fixed: Create NodeInfo protobuf objects, not dicts
         cluster_members = []
         for n, info in self.ring.nodes.items():
@@ -216,7 +353,7 @@ class Node:
                     address=info['address']
                 )
             )
-
+        
         return dynamo_pb2.JoinResponse(
             success=True,
             cluster_members=cluster_members
@@ -414,160 +551,6 @@ class Node:
         """Handle internal GET replication request. Returns list of versions."""
         return self.local_get(key)
 
-    # ============================================
-    # Gossip Protocol Implementation
-    # ============================================
-
-    def _gossip_loop(self):
-        """Background thread that periodically sends gossip to random nodes."""
-        print(f"[GOSSIP] Starting gossip loop for node {self.node_id}")
-
-        while self.running:
-            try:
-                # Update own heartbeat
-                with self.gossip_lock:
-                    self.member_state[self.node_id]['heartbeat'] = int(time.time() * 1000)
-
-                # Get list of other known nodes
-                with self.gossip_lock:
-                    other_nodes = [
-                        (nid, info) for nid, info in self.member_state.items()
-                        if nid != self.node_id
-                    ]
-
-                # Send gossip to random node if any exist
-                if other_nodes:
-                    target_id, target_info = random.choice(other_nodes)
-                    self._send_gossip(target_id, target_info['address'])
-
-                # Check for failures
-                self._detect_failures()
-
-                # Sleep before next gossip round
-                time.sleep(self.GOSSIP_INTERVAL_S)
-
-            except Exception as e:
-                print(f"[GOSSIP] Error in gossip loop: {e}")
-                time.sleep(self.GOSSIP_INTERVAL_S)
-
-    def _send_gossip(self, target_id: str, target_address: str):
-        """Send gossip message to a specific node."""
-        try:
-            # Prepare member states to send
-            with self.gossip_lock:
-                members_to_send = []
-                for node_id, info in self.member_state.items():
-                    member_proto = dynamo_pb2.MemberState(
-                        node_id=node_id,
-                        capacity=info['capacity'],
-                        address=info['address'],
-                        heartbeat=info['heartbeat'],
-                        version=info['version']
-                    )
-                    members_to_send.append(member_proto)
-
-            # Send gossip via gRPC
-            channel = grpc.insecure_channel(target_address)
-            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
-
-            request = dynamo_pb2.GossipMessage(
-                sender_id=self.node_id,
-                members=members_to_send
-            )
-
-            response = stub.Gossip(request, timeout=2)
-
-            # Merge received member states
-            if response.success:
-                self._merge_member_states(response.members)
-
-            channel.close()
-
-        except Exception as e:
-            # Gossip failures are expected (nodes may be down)
-            pass
-
-    def _merge_member_states(self, received_members):
-        """Merge received member states with local view."""
-        with self.gossip_lock:
-            for member in received_members:
-                node_id = member.node_id
-
-                # If new node, add to member state
-                if node_id not in self.member_state:
-                    self.member_state[node_id] = {
-                        'capacity': member.capacity,
-                        'address': member.address,
-                        'heartbeat': member.heartbeat,
-                        'version': member.version
-                    }
-                    # Add to ring
-                    if node_id not in self.ring.nodes:
-                        self.ring.add_node(node_id, member.capacity, member.address)
-                    print(f"[GOSSIP] Discovered new node {node_id} via gossip")
-
-                else:
-                    # Update if received version is newer
-                    local_version = self.member_state[node_id]['version']
-                    if member.version > local_version or member.heartbeat > self.member_state[node_id]['heartbeat']:
-                        self.member_state[node_id]['heartbeat'] = max(
-                            member.heartbeat,
-                            self.member_state[node_id]['heartbeat']
-                        )
-                        self.member_state[node_id]['version'] = max(
-                            member.version,
-                            local_version
-                        )
-
-    def _detect_failures(self):
-        """Detect failed nodes based on heartbeat timeout."""
-        current_time = int(time.time() * 1000)
-        failed_nodes = []
-
-        with self.gossip_lock:
-            for node_id, info in list(self.member_state.items()):
-                if node_id == self.node_id:
-                    continue
-
-                time_since_heartbeat = current_time - info['heartbeat']
-                if time_since_heartbeat > self.FAILURE_THRESHOLD_MS:
-                    failed_nodes.append(node_id)
-
-        # Remove failed nodes
-        for node_id in failed_nodes:
-            self._remove_failed_node(node_id)
-
-    def _remove_failed_node(self, node_id: str):
-        """Remove a failed node from the cluster."""
-        with self.gossip_lock:
-            if node_id in self.member_state:
-                del self.member_state[node_id]
-                print(f"[GOSSIP] Detected failure of node {node_id}, removing from cluster")
-
-        # Remove from ring
-        if node_id in self.ring.nodes:
-            self.ring.remove_node(node_id)
-
-    def handle_gossip(self, sender_id: str, received_members):
-        """Handle incoming gossip message."""
-        # Merge received states
-        self._merge_member_states(received_members)
-
-        # Prepare response with our view
-        with self.gossip_lock:
-            members_to_send = []
-            for node_id, info in self.member_state.items():
-                member_proto = dynamo_pb2.MemberState(
-                    node_id=node_id,
-                    capacity=info['capacity'],
-                    address=info['address'],
-                    heartbeat=info['heartbeat'],
-                    version=info['version']
-                )
-                members_to_send.append(member_proto)
-
-        return dynamo_pb2.GossipResponse(success=True, members=members_to_send)
-
 
 # ============================================
 # gRPC Service Implementations
@@ -612,10 +595,20 @@ class NodeServicer(dynamo_pb2_grpc.NodeServiceServicer):
             return dynamo_pb2.ReplicateGetResponse(found=True, values=values_proto)
         else:
             return dynamo_pb2.ReplicateGetResponse(found=False)
-
+    
     def Gossip(self, request, context):
-        """Handle GOSSIP request from another node."""
-        return self.node.handle_gossip(request.sender_id, request.members)
+        """Handle gossip ping from another node."""
+        # Convert proto to dict
+        remote_view = {}
+        for nid, node_info in request.ring_view.items():
+            remote_view[nid] = {
+                'capacity': node_info.capacity,
+                'address': node_info.address,
+                'last_seen': node_info.last_seen,
+                'is_alive': node_info.is_alive
+            }
+        
+        return self.node.handle_gossip_ping(request.sender_id, remote_view)
 
 
 class DynamoServicer(dynamo_pb2_grpc.DynamoServiceServicer):

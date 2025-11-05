@@ -5,7 +5,7 @@ import warnings
 
 import dynamo_pb2 as dynamo__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.75.1'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in dynamo_pb2_grpc.py depends on'
+        + f' but the generated code in dynamo_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -178,8 +178,8 @@ class NodeServiceStub(object):
                 _registered_method=True)
         self.Gossip = channel.unary_unary(
                 '/dynamo.NodeService/Gossip',
-                request_serializer=dynamo__pb2.GossipMessage.SerializeToString,
-                response_deserializer=dynamo__pb2.GossipResponse.FromString,
+                request_serializer=dynamo__pb2.GossipPing.SerializeToString,
+                response_deserializer=dynamo__pb2.GossipPong.FromString,
                 _registered_method=True)
 
 
@@ -205,7 +205,8 @@ class NodeServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def Gossip(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Gossip protocol - FIXED: renamed method to Gossip (was GossipPing)
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -230,8 +231,8 @@ def add_NodeServiceServicer_to_server(servicer, server):
             ),
             'Gossip': grpc.unary_unary_rpc_method_handler(
                     servicer.Gossip,
-                    request_deserializer=dynamo__pb2.GossipMessage.FromString,
-                    response_serializer=dynamo__pb2.GossipResponse.SerializeToString,
+                    request_deserializer=dynamo__pb2.GossipPing.FromString,
+                    response_serializer=dynamo__pb2.GossipPong.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -340,8 +341,8 @@ class NodeService(object):
             request,
             target,
             '/dynamo.NodeService/Gossip',
-            dynamo__pb2.GossipMessage.SerializeToString,
-            dynamo__pb2.GossipResponse.FromString,
+            dynamo__pb2.GossipPing.SerializeToString,
+            dynamo__pb2.GossipPong.FromString,
             options,
             channel_credentials,
             insecure,

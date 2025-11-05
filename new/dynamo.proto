@@ -10,6 +10,8 @@ message NodeInfo {
     string node_id = 1;
     int32 capacity = 2;
     string address = 3;
+    int64 last_seen = 4;     // Timestamp when last seen
+    bool is_alive = 5;       // Alive or dead
 }
 
 message JoinRequest {
@@ -20,29 +22,7 @@ message JoinRequest {
 
 message JoinResponse {
     bool success = 1;
-    repeated NodeInfo cluster_members = 2;
-}
-
-// ============================================
-// Gossip Protocol Messages
-// ============================================
-
-message MemberState {
-    string node_id = 1;
-    int32 capacity = 2;
-    string address = 3;
-    int64 heartbeat = 4;  // Timestamp of last known activity
-    int32 version = 5;    // Increment on each update for conflict resolution
-}
-
-message GossipMessage {
-    string sender_id = 1;
-    repeated MemberState members = 2;  // Sender's view of cluster
-}
-
-message GossipResponse {
-    bool success = 1;
-    repeated MemberState members = 2;  // Receiver's view to merge back
+    repeated NodeInfo cluster_members = 2; 
 }
 
 // ============================================
@@ -101,6 +81,19 @@ message ReplicateGetResponse {
 }
 
 // ============================================
+// Gossip Protocol Messages
+// ============================================
+
+message GossipPing {
+    string sender_id = 1;
+    map<string, NodeInfo> ring_view = 2;  // Sender's view of the ring
+}
+
+message GossipPong {
+    map<string, NodeInfo> ring_view = 1;  // Receiver's view of the ring
+}
+
+// ============================================
 // Service Definitions
 // ============================================
 
@@ -109,9 +102,11 @@ service DynamoService {
     rpc Get(GetRequest) returns (GetResponse);
 }
 
-service NodeService {
+service NodeService {   
     rpc Join(JoinRequest) returns (JoinResponse);
     rpc ReplicateGet(ReplicateGetRequest) returns (ReplicateGetResponse);
     rpc ReplicatePut(ReplicatePutRequest) returns (ReplicatePutResponse);
-    rpc Gossip(GossipMessage) returns (GossipResponse);
+    
+    // Gossip protocol - FIXED: renamed method to Gossip (was GossipPing)
+    rpc Gossip(GossipPing) returns (GossipPong);
 }
