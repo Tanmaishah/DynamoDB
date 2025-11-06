@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x64ynamo.proto\x12\x06\x64ynamo\"c\n\x08NodeInfo\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\x12\x11\n\tlast_seen\x18\x04 \x01(\x03\x12\x10\n\x08is_alive\x18\x05 \x01(\x08\"A\n\x0bJoinRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\"J\n\x0cJoinResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12)\n\x0f\x63luster_members\x18\x02 \x03(\x0b\x32\x10.dynamo.NodeInfo\"j\n\x0bVectorClock\x12-\n\x05\x63lock\x18\x01 \x03(\x0b\x32\x1e.dynamo.VectorClock.ClockEntry\x1a,\n\nClockEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"N\n\nPutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12$\n\x07\x63ontext\x18\x03 \x01(\x0b\x32\x13.dynamo.VectorClock\"J\n\x0bPutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12*\n\rupdated_clock\x18\x02 \x01(\x0b\x32\x13.dynamo.VectorClock\"\x19\n\nGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"J\n\x0eVersionedValue\x12\r\n\x05value\x18\x01 \x01(\t\x12)\n\x0cvector_clock\x18\x02 \x01(\x0b\x32\x13.dynamo.VectorClock\"D\n\x0bGetResponse\x12\r\n\x05\x66ound\x18\x01 \x01(\x08\x12&\n\x06values\x18\x02 \x03(\x0b\x32\x16.dynamo.VersionedValue\"\\\n\x13ReplicatePutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12)\n\x0cvector_clock\x18\x03 \x01(\x0b\x32\x13.dynamo.VectorClock\"\'\n\x14ReplicatePutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"\"\n\x13ReplicateGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"M\n\x14ReplicateGetResponse\x12\r\n\x05\x66ound\x18\x01 \x01(\x08\x12&\n\x06values\x18\x02 \x03(\x0b\x32\x16.dynamo.VersionedValue\"\x97\x01\n\nGossipPing\x12\x11\n\tsender_id\x18\x01 \x01(\t\x12\x33\n\tring_view\x18\x02 \x03(\x0b\x32 .dynamo.GossipPing.RingViewEntry\x1a\x41\n\rRingViewEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x1f\n\x05value\x18\x02 \x01(\x0b\x32\x10.dynamo.NodeInfo:\x02\x38\x01\"\x84\x01\n\nGossipPong\x12\x33\n\tring_view\x18\x01 \x03(\x0b\x32 .dynamo.GossipPong.RingViewEntry\x1a\x41\n\rRingViewEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x1f\n\x05value\x18\x02 \x01(\x0b\x32\x10.dynamo.NodeInfo:\x02\x38\x01\x32o\n\rDynamoService\x12.\n\x03Put\x12\x12.dynamo.PutRequest\x1a\x13.dynamo.PutResponse\x12.\n\x03Get\x12\x12.dynamo.GetRequest\x1a\x13.dynamo.GetResponse2\x88\x02\n\x0bNodeService\x12\x31\n\x04Join\x12\x13.dynamo.JoinRequest\x1a\x14.dynamo.JoinResponse\x12I\n\x0cReplicateGet\x12\x1b.dynamo.ReplicateGetRequest\x1a\x1c.dynamo.ReplicateGetResponse\x12I\n\x0cReplicatePut\x12\x1b.dynamo.ReplicatePutRequest\x1a\x1c.dynamo.ReplicatePutResponse\x12\x30\n\x06Gossip\x12\x12.dynamo.GossipPing\x1a\x12.dynamo.GossipPongb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0c\x64ynamo.proto\x12\x06\x64ynamo\"c\n\x08NodeInfo\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\x12\x11\n\tlast_seen\x18\x04 \x01(\x03\x12\x10\n\x08is_alive\x18\x05 \x01(\x08\"A\n\x0bJoinRequest\x12\x0f\n\x07node_id\x18\x01 \x01(\t\x12\x10\n\x08\x63\x61pacity\x18\x02 \x01(\x05\x12\x0f\n\x07\x61\x64\x64ress\x18\x03 \x01(\t\"J\n\x0cJoinResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12)\n\x0f\x63luster_members\x18\x02 \x03(\x0b\x32\x10.dynamo.NodeInfo\"j\n\x0bVectorClock\x12-\n\x05\x63lock\x18\x01 \x03(\x0b\x32\x1e.dynamo.VectorClock.ClockEntry\x1a,\n\nClockEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"N\n\nPutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12$\n\x07\x63ontext\x18\x03 \x01(\x0b\x32\x13.dynamo.VectorClock\"J\n\x0bPutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12*\n\rupdated_clock\x18\x02 \x01(\x0b\x32\x13.dynamo.VectorClock\"\x19\n\nGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"J\n\x0eVersionedValue\x12\r\n\x05value\x18\x01 \x01(\t\x12)\n\x0cvector_clock\x18\x02 \x01(\x0b\x32\x13.dynamo.VectorClock\"D\n\x0bGetResponse\x12\r\n\x05\x66ound\x18\x01 \x01(\x08\x12&\n\x06values\x18\x02 \x03(\x0b\x32\x16.dynamo.VersionedValue\"\\\n\x13ReplicatePutRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\x12)\n\x0cvector_clock\x18\x03 \x01(\x0b\x32\x13.dynamo.VectorClock\"\'\n\x14ReplicatePutResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\"\"\n\x13ReplicateGetRequest\x12\x0b\n\x03key\x18\x01 \x01(\t\"M\n\x14ReplicateGetResponse\x12\r\n\x05\x66ound\x18\x01 \x01(\x08\x12&\n\x06values\x18\x02 \x03(\x0b\x32\x16.dynamo.VersionedValue\"\x13\n\x11GetClusterRequest\"7\n\x12GetClusterResponse\x12!\n\x07members\x18\x01 \x03(\x0b\x32\x10.dynamo.NodeInfo\"\x97\x01\n\nGossipPing\x12\x11\n\tsender_id\x18\x01 \x01(\t\x12\x33\n\tring_view\x18\x02 \x03(\x0b\x32 .dynamo.GossipPing.RingViewEntry\x1a\x41\n\rRingViewEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x1f\n\x05value\x18\x02 \x01(\x0b\x32\x10.dynamo.NodeInfo:\x02\x38\x01\"\x84\x01\n\nGossipPong\x12\x33\n\tring_view\x18\x01 \x03(\x0b\x32 .dynamo.GossipPong.RingViewEntry\x1a\x41\n\rRingViewEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x1f\n\x05value\x18\x02 \x01(\x0b\x32\x10.dynamo.NodeInfo:\x02\x38\x01\x32o\n\rDynamoService\x12.\n\x03Put\x12\x12.dynamo.PutRequest\x1a\x13.dynamo.PutResponse\x12.\n\x03Get\x12\x12.dynamo.GetRequest\x1a\x13.dynamo.GetResponse2\xc1\x03\n\x0bNodeService\x12\x31\n\x04Join\x12\x13.dynamo.JoinRequest\x1a\x14.dynamo.JoinResponse\x12I\n\x0cReplicateGet\x12\x1b.dynamo.ReplicateGetRequest\x1a\x1c.dynamo.ReplicateGetResponse\x12I\n\x0cReplicatePut\x12\x1b.dynamo.ReplicatePutRequest\x1a\x1c.dynamo.ReplicatePutResponse\x12\x30\n\x06Gossip\x12\x12.dynamo.GossipPing\x1a\x12.dynamo.GossipPong\x12\x43\n\nGetCluster\x12\x19.dynamo.GetClusterRequest\x1a\x1a.dynamo.GetClusterResponse\x12\x38\n\rCoordinatePut\x12\x12.dynamo.PutRequest\x1a\x13.dynamo.PutResponse\x12\x38\n\rCoordinateGet\x12\x12.dynamo.GetRequest\x1a\x13.dynamo.GetResponseb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -65,16 +65,20 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_REPLICATEGETREQUEST']._serialized_end=874
   _globals['_REPLICATEGETRESPONSE']._serialized_start=876
   _globals['_REPLICATEGETRESPONSE']._serialized_end=953
-  _globals['_GOSSIPPING']._serialized_start=956
-  _globals['_GOSSIPPING']._serialized_end=1107
-  _globals['_GOSSIPPING_RINGVIEWENTRY']._serialized_start=1042
-  _globals['_GOSSIPPING_RINGVIEWENTRY']._serialized_end=1107
-  _globals['_GOSSIPPONG']._serialized_start=1110
-  _globals['_GOSSIPPONG']._serialized_end=1242
-  _globals['_GOSSIPPONG_RINGVIEWENTRY']._serialized_start=1042
-  _globals['_GOSSIPPONG_RINGVIEWENTRY']._serialized_end=1107
-  _globals['_DYNAMOSERVICE']._serialized_start=1244
-  _globals['_DYNAMOSERVICE']._serialized_end=1355
-  _globals['_NODESERVICE']._serialized_start=1358
-  _globals['_NODESERVICE']._serialized_end=1622
+  _globals['_GETCLUSTERREQUEST']._serialized_start=955
+  _globals['_GETCLUSTERREQUEST']._serialized_end=974
+  _globals['_GETCLUSTERRESPONSE']._serialized_start=976
+  _globals['_GETCLUSTERRESPONSE']._serialized_end=1031
+  _globals['_GOSSIPPING']._serialized_start=1034
+  _globals['_GOSSIPPING']._serialized_end=1185
+  _globals['_GOSSIPPING_RINGVIEWENTRY']._serialized_start=1120
+  _globals['_GOSSIPPING_RINGVIEWENTRY']._serialized_end=1185
+  _globals['_GOSSIPPONG']._serialized_start=1188
+  _globals['_GOSSIPPONG']._serialized_end=1320
+  _globals['_GOSSIPPONG_RINGVIEWENTRY']._serialized_start=1120
+  _globals['_GOSSIPPONG_RINGVIEWENTRY']._serialized_end=1185
+  _globals['_DYNAMOSERVICE']._serialized_start=1322
+  _globals['_DYNAMOSERVICE']._serialized_end=1433
+  _globals['_NODESERVICE']._serialized_start=1436
+  _globals['_NODESERVICE']._serialized_end=1885
 # @@protoc_insertion_point(module_scope)

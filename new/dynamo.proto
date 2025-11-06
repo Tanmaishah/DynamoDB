@@ -81,6 +81,31 @@ message ReplicateGetResponse {
 }
 
 // ============================================
+// Hinted Handoff Messages
+// ============================================
+
+message HintedHandoff {
+    string key = 1;
+    string value = 2;
+    VectorClock vector_clock = 3;
+    string intended_for = 4;  // Node ID this hint is for
+}
+
+message HintResponse {
+    bool success = 1;
+}
+
+// ============================================
+// Cluster Discovery Messages
+// ============================================
+
+message GetClusterRequest {}
+
+message GetClusterResponse {
+    repeated NodeInfo members = 1;
+}
+
+// ============================================
 // Gossip Protocol Messages
 // ============================================
 

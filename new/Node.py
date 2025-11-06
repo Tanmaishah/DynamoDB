@@ -74,6 +74,8 @@ class HashRing:
                 self.nodes[node]['last_seen'] = time.time()
                 if was_dead:  # Only print if state changed (recovery!)
                     print(f"\n✅ [{time.strftime('%H:%M:%S')}] Node {node} is ALIVE again! (recovered)")
+                    return True  # Signal that node recovered
+        return False
     
     def update_from_gossip(self, remote_view: dict):
         """
@@ -149,6 +151,10 @@ class Node:
         
         # Storage now holds List[VersionedValue] for each key
         self.storage = {}  # key -> List[VersionedValue]
+        
+        # Hints storage for temporary failures
+        self.hints = {}    # key -> {'value': str, 'vector_clock': VC, 'intended_for': str, 'created_at': float}
+        self.hints_lock = threading.RLock()
         
         self.server = None
         self.N = 3  # replication factor
@@ -267,6 +273,10 @@ class Node:
                     self.ring.update_from_gossip(remote_view)
                     self.ring.mark_node_alive(target)
                     
+                    # Check if node recovered (was dead, now alive)
+                    # If so, forward any hints we have for it
+                    self.check_and_forward_hints(target)
+                    
                     channel.close()
                 else:
                     print(f"[GOSSIP {self.node_id}] No other nodes to gossip with")
@@ -278,7 +288,6 @@ class Node:
                         if nid != self.node_id and info['is_alive']:
                             time_since_seen = current_time - info['last_seen']
                             if time_since_seen > self.FAILURE_THRESHOLD:
-                                print(f"[GOSSIP {self.node_id}] Node {nid} unresponsive for {time_since_seen:.0f}s")
                                 self.ring.mark_node_dead(nid)
                 
             except Exception as e:
@@ -311,6 +320,163 @@ class Node:
                 )
         
         return dynamo_pb2.GossipPong(ring_view=my_view)
+    
+    # ============================================
+    # Hinted Handoff
+    # ============================================
+    
+    def get_temp_replicas(self, key: str, count: int, exclude_nodes: list) -> list:
+        """
+        Get temporary replica nodes for hinted handoff.
+        
+        Args:
+            key: The key being stored
+            count: Number of temp replicas needed
+            exclude_nodes: Nodes to exclude (primary preference list)
+            
+        Returns:
+            List of (temp_node_id, intended_for_node_id) tuples
+        """
+        # Get extended preference list (walk further clockwise)
+        extended_pref = self.ring.get_preference_list(key, N=10)
+        
+        temp_replicas = []
+        exclude_set = set(exclude_nodes)
+        
+        for node_id in extended_pref:
+            if node_id not in exclude_set and self.ring.nodes[node_id]['is_alive']:
+                temp_replicas.append(node_id)
+                exclude_set.add(node_id)  # Don't use same node twice
+                
+                if len(temp_replicas) >= count:
+                    break
+        
+        return temp_replicas
+    
+    def store_hint(self, key: str, value: str, vector_clock: VectorClock, intended_for: str):
+        """
+        Store a hint for a temporarily down node.
+        
+        Args:
+            key: Key to store
+            value: Value to store
+            vector_clock: Vector clock of the write
+            intended_for: Node ID this hint is intended for
+        """
+        with self.hints_lock:
+            self.hints[key] = {
+                'value': value,
+                'vector_clock': vector_clock,
+                'intended_for': intended_for,
+                'created_at': time.time()
+            }
+            print(f"  [HINT] Storing {key} as hint for node {intended_for}")
+    
+    def check_and_forward_hints(self, recovered_node_id: str):
+        """
+        Check if we have any hints for a recovered node and forward them.
+        Called when gossip detects a node came back alive.
+        
+        Args:
+            recovered_node_id: Node ID that just recovered
+        """
+        with self.hints_lock:
+            hints_to_forward = []
+            
+            # Find all hints for this node
+            for key, hint in self.hints.items():
+                if hint['intended_for'] == recovered_node_id:
+                    hints_to_forward.append((key, hint))
+            
+            if not hints_to_forward:
+                return  # No hints for this node
+            
+            print(f"\n[HINT FORWARDING] Node {recovered_node_id} recovered, forwarding {len(hints_to_forward)} hint(s)...")
+            
+            # Forward each hint
+            for key, hint in hints_to_forward:
+                success = self.forward_hint_to_node(recovered_node_id, key, hint)
+                if success:
+                    # Delete hint after successful forward
+                    del self.hints[key]
+                    print(f"  ✓ Forwarded and deleted hint for {key}")
+                else:
+                    print(f"  ✗ Failed to forward hint for {key}, will retry later")
+    
+    def forward_hint_to_node(self, node_id: str, key: str, hint: dict) -> bool:
+        """
+        Forward a single hint to the recovered node.
+        
+        Args:
+            node_id: Node to forward hint to
+            key: Key of the hint
+            hint: Hint data dict
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            node_address = self.ring.nodes[node_id]['address']
+            channel = grpc.insecure_channel(node_address)
+            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+            
+            # Build hint message
+            vc_proto = dynamo_pb2.VectorClock(clock=hint['vector_clock'].to_dict())
+            request = dynamo_pb2.HintedHandoff(
+                key=key,
+                value=hint['value'],
+                vector_clock=vc_proto,
+                intended_for=hint['intended_for']
+            )
+            
+            response = stub.ReceiveHint(request, timeout=3)
+            channel.close()
+            
+            return response.success
+            
+        except Exception as e:
+            print(f"  ✗ Error forwarding hint to {node_id}: {e}")
+            return False
+    
+    def receive_hint(self, key: str, value: str, vector_clock: VectorClock) -> bool:
+        """
+        Receive a hint from another node (I was down, now I'm back).
+        Store it as regular data.
+        
+        Args:
+            key: Key to store
+            value: Value to store
+            vector_clock: Vector clock of the value
+            
+        Returns:
+            True if successful
+        """
+        try:
+            print(f"[HINT RECEIVED] Storing {key} from hint")
+            self.local_put(key, value, vector_clock)
+            return True
+        except Exception as e:
+            print(f"✗ Failed to store hint: {e}")
+            return False
+    
+    def get_cluster_members(self):
+        """
+        Return list of all cluster members.
+        Used by clients to discover the cluster.
+        """
+        members = []
+        with self.ring.lock:
+            for node_id, info in self.ring.nodes.items():
+                members.append(
+                    dynamo_pb2.NodeInfo(
+                        node_id=node_id,
+                        capacity=info['capacity'],
+                        address=info['address'],
+                        last_seen=int(info['last_seen']),
+                        is_alive=info['is_alive']
+                    )
+                )
+        return members
     
     # ============================================
     # JOIN Request Handling
@@ -387,11 +553,15 @@ class Node:
 
     # ============================================
     # Coordinated PUT/GET with Replication and Vector Clocks
+    # WITH FORWARDING TO COORDINATOR
     # ============================================
     
     def coordinated_put(self, key: str, value: str, context: VectorClock = None):
         """
-        Coordinate PUT operation with vector clocks.
+        Coordinate PUT operation with forwarding to coordinator.
+        
+        Design: Only the FIRST node in preference list coordinates.
+        All other nodes forward to the coordinator.
         
         Args:
             key: Key to store
@@ -401,33 +571,45 @@ class Node:
         Returns:
             (success, updated_vector_clock)
         """
-        print(f"\n[COORDINATOR {self.node_id}] PUT {key} = {value}")
+        print(f"\n[{self.node_id}] Received PUT request: {key} = {value}")
         
+        # Step 1: Calculate preference list
         preference_list = self.ring.get_preference_list(key, self.N)
+        
         if not preference_list:
-            print("✗ No nodes available to store the key.")
+            print(f"✗ No nodes available to store the key.")
             return False, None
         
         print(f"  Preference list: {preference_list} (N={self.N})")
         
+        # Step 2: Determine coordinator (first in preference list)
+        coordinator = preference_list[0]
+        
+        # Step 3: Check if I am the coordinator
+        if self.node_id != coordinator:
+            # I'm NOT the coordinator - FORWARD to coordinator
+            print(f"  [{self.node_id}] I'm not coordinator, forwarding to {coordinator}")
+            return self.forward_put_to_coordinator(coordinator, key, value, context)
+        
+        # Step 4: I AM the coordinator - handle replication
+        print(f"  [{self.node_id}] I AM coordinator, handling replication")
+        
         # Create vector clock
         if context:
-            # Client provided context, merge and increment
             vc = context.copy()
             vc.increment(self.node_id)
             print(f"  Context provided: {context}, updated to: {vc}")
         else:
-            # New write, create fresh vector clock
             vc = VectorClock()
             vc.increment(self.node_id)
             print(f"  New vector clock: {vc}")
         
-        # Replicate to N nodes
+        # Replicate to N nodes (including myself)
         success_count = 0
         for node_id in preference_list:
             try:
                 if node_id == self.node_id:
-                    # Local write
+                    # Local write (I'm in preference list)
                     self.local_put(key, value, vc)
                     success_count += 1
                 else:
@@ -449,6 +631,7 @@ class Node:
                     if response.success:
                         success_count += 1
                         print(f"  ✓ Replicated to {node_id}")
+                    
                     channel.close()
             except Exception as e:
                 print(f"  ✗ Error replicating to node {node_id}: {e}")
@@ -461,22 +644,77 @@ class Node:
             print(f"  ✗ Write quorum failed: {success_count}/{self.N} (W={self.W})")
             return False, None
     
+    def forward_put_to_coordinator(self, coordinator_id: str, key: str, value: str, context: VectorClock):
+        """
+        Forward PUT request to coordinator node.
+        
+        Args:
+            coordinator_id: Node ID of coordinator
+            key: Key to store
+            value: Value to store
+            context: Vector clock context
+            
+        Returns:
+            (success, updated_vector_clock)
+        """
+        try:
+            coordinator_address = self.ring.nodes[coordinator_id]['address']
+            channel = grpc.insecure_channel(coordinator_address)
+            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+            
+            # Build request
+            request = dynamo_pb2.PutRequest(key=key, value=value)
+            if context:
+                vc_proto = dynamo_pb2.VectorClock(clock=context.to_dict())
+                request.context.CopyFrom(vc_proto)
+            
+            # Forward to coordinator via CoordinatePut RPC
+            response = stub.CoordinatePut(request, timeout=5)
+            
+            channel.close()
+            
+            if response.success:
+                vc = VectorClock.from_dict(dict(response.updated_clock.clock)) if response.updated_clock else None
+                print(f"  ✓ Coordinator {coordinator_id} handled successfully")
+                return True, vc
+            else:
+                print(f"  ✗ Coordinator {coordinator_id} failed")
+                return False, None
+                
+        except Exception as e:
+            print(f"  ✗ Failed to forward to coordinator {coordinator_id}: {e}")
+            return False, None
+    
     def coordinated_get(self, key: str):
         """
-        Coordinate GET operation with vector clocks.
+        Coordinate GET operation with forwarding to coordinator.
         Returns all concurrent versions if conflicts exist.
         
         Returns:
             List of VersionedValue objects (may have multiple if conflict)
         """
-        print(f"\n[COORDINATOR {self.node_id}] GET {key}")
+        print(f"\n[{self.node_id}] Received GET request: {key}")
         
+        # Step 1: Calculate preference list
         preference_list = self.ring.get_preference_list(key, self.N)
+        
         if not preference_list:
             print("✗ No nodes available to retrieve the key.")
             return []
         
         print(f"  Preference list: {preference_list} (N={self.N})")
+        
+        # Step 2: Determine coordinator
+        coordinator = preference_list[0]
+        
+        # Step 3: Check if I am the coordinator
+        if self.node_id != coordinator:
+            # Forward to coordinator
+            print(f"  [{self.node_id}] I'm not coordinator, forwarding to {coordinator}")
+            return self.forward_get_to_coordinator(coordinator, key)
+        
+        # Step 4: I AM the coordinator - handle read
+        print(f"  [{self.node_id}] I AM coordinator, handling read")
         
         # Collect all versions from replicas
         all_versions = []
@@ -533,6 +771,44 @@ class Node:
             print(f"  ✓ No conflicts, returning 1 version")
         
         return resolved
+    
+    def forward_get_to_coordinator(self, coordinator_id: str, key: str):
+        """
+        Forward GET request to coordinator node.
+        
+        Args:
+            coordinator_id: Node ID of coordinator
+            key: Key to retrieve
+            
+        Returns:
+            List of VersionedValue objects
+        """
+        try:
+            coordinator_address = self.ring.nodes[coordinator_id]['address']
+            channel = grpc.insecure_channel(coordinator_address)
+            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+            
+            request = dynamo_pb2.GetRequest(key=key)
+            response = stub.CoordinateGet(request, timeout=5)
+            
+            channel.close()
+            
+            if response.found:
+                # Convert proto to VersionedValue objects
+                results = []
+                for vv_proto in response.values:
+                    vc = VectorClock.from_dict(dict(vv_proto.vector_clock.clock))
+                    results.append(VersionedValue(key, vv_proto.value, vc))
+                
+                print(f"  ✓ Coordinator {coordinator_id} returned {len(results)} version(s)")
+                return results
+            else:
+                print(f"  ✗ Coordinator {coordinator_id}: key not found")
+                return []
+                
+        except Exception as e:
+            print(f"  ✗ Failed to forward to coordinator {coordinator_id}: {e}")
+            return []
     
     # ============================================
     # Handle Internal Replication Requests
@@ -609,6 +885,56 @@ class NodeServicer(dynamo_pb2_grpc.NodeServiceServicer):
             }
         
         return self.node.handle_gossip_ping(request.sender_id, remote_view)
+    
+    def GetCluster(self, request, context):
+        """Handle GetCluster request from clients."""
+        members = self.node.get_cluster_members()
+        return dynamo_pb2.GetClusterResponse(members=members)
+    
+    def CoordinatePut(self, request, context):
+        """
+        Handle forwarded PUT request (internal node-to-node).
+        This node is the coordinator for this key.
+        """
+        # Convert context if provided
+        vc_context = None
+        if request.context and request.context.clock:
+            vc_context = VectorClock.from_dict(dict(request.context.clock))
+        
+        # Coordinate the PUT (this node is coordinator)
+        success, updated_vc = self.node.coordinated_put(
+            request.key,
+            request.value,
+            vc_context
+        )
+        
+        if success and updated_vc:
+            vc_proto = dynamo_pb2.VectorClock(clock=updated_vc.to_dict())
+            return dynamo_pb2.PutResponse(success=True, updated_clock=vc_proto)
+        else:
+            return dynamo_pb2.PutResponse(success=False)
+    
+    def CoordinateGet(self, request, context):
+        """
+        Handle forwarded GET request (internal node-to-node).
+        This node is the coordinator for this key.
+        """
+        versions = self.node.coordinated_get(request.key)
+        
+        if versions:
+            # Convert to proto
+            values_proto = []
+            for v in versions:
+                vc_proto = dynamo_pb2.VectorClock(clock=v.vector_clock.to_dict())
+                vv_proto = dynamo_pb2.VersionedValue(
+                    value=v.value,
+                    vector_clock=vc_proto
+                )
+                values_proto.append(vv_proto)
+            
+            return dynamo_pb2.GetResponse(found=True, values=values_proto)
+        else:
+            return dynamo_pb2.GetResponse(found=False)
 
 
 class DynamoServicer(dynamo_pb2_grpc.DynamoServiceServicer):
