@@ -163,7 +163,7 @@ class Node:
         
         # Gossip configuration
         self.GOSSIP_INTERVAL = 1.0  # seconds
-        self.FAILURE_THRESHOLD = 10.0  # seconds - mark dead if no response
+        self.FAILURE_THRESHOLD = 3.0  # seconds - mark dead if no response (faster detection)
         self.gossip_thread = None
         self.running = False
         
@@ -222,8 +222,14 @@ class Node:
         """
         print(f"[GOSSIP] Starting gossip routine for {self.node_id}")
         
+        gossip_count = 0  # Counter for log throttling
+        LOG_EVERY_N_GOSSIPS = 900  # Print logs every 900 gossips (15 minutes if interval=1s)
+        
         while self.running:
             try:
+                gossip_count += 1
+                should_log = (gossip_count % LOG_EVERY_N_GOSSIPS == 0)
+                
                 # Get all alive peers (excluding self)
                 peers = self.ring.get_all_alive_nodes()
                 peers = [p for p in peers if p != self.node_id]
@@ -233,7 +239,8 @@ class Node:
                     target = random.choice(peers)
                     target_addr = self.ring.nodes[target]['address']
                     
-                    print(f"[GOSSIP {self.node_id}] Pinging {target}...", end=" ", flush=True)
+                    if should_log:
+                        print(f"[GOSSIP {self.node_id}] Pinging {target}...", end=" ", flush=True)
                     
                     # Build my ring view
                     my_view = {}
@@ -258,7 +265,8 @@ class Node:
                     
                     response = stub.Gossip(request, timeout=0.5)
                     
-                    print(f"✓")  # Success
+                    if should_log:
+                        print(f"✓")  # Success
                     
                     # Merge their view
                     remote_view = {}
@@ -279,7 +287,8 @@ class Node:
                     
                     channel.close()
                 else:
-                    print(f"[GOSSIP {self.node_id}] No other nodes to gossip with")
+                    if should_log:
+                        print(f"[GOSSIP {self.node_id}] No other nodes to gossip with")
                 
                 # Check for dead nodes (haven't heard from in FAILURE_THRESHOLD)
                 with self.ring.lock:
@@ -292,7 +301,8 @@ class Node:
                 
             except Exception as e:
                 # Gossip errors are expected when nodes are down
-                print(f"✗ (timeout/unreachable)")
+                if should_log:
+                    print(f"✗ (timeout/unreachable)")
             
             time.sleep(self.GOSSIP_INTERVAL)
     
@@ -301,9 +311,7 @@ class Node:
         Handle incoming gossip ping.
         Merge sender's view and return our view.
         """
-        print(f"[GOSSIP {self.node_id}] Received ping from {sender_id}")
-        
-        # Merge sender's view into our ring
+        # Merge sender's view into our ring (silent, happens every second)
         self.ring.update_from_gossip(remote_view)
         self.ring.mark_node_alive(sender_id)
         
@@ -669,7 +677,7 @@ class Node:
                 request.context.CopyFrom(vc_proto)
             
             # Forward to coordinator via CoordinatePut RPC
-            response = stub.CoordinatePut(request, timeout=5)
+            response = stub.CoordinatePut(request, timeout=1)  # Fast timeout for quick failover
             
             channel.close()
             
@@ -682,13 +690,23 @@ class Node:
                 return False, None
                 
         except Exception as e:
-            print(f"  ✗ Failed to forward to coordinator {coordinator_id}: {e}")
-            return False, None
+            # Coordinator is unreachable - mark as dead immediately and retry
+            print(f"  ✗ Coordinator {coordinator_id} unreachable: {e}")
+            print(f"  🔄 Marking {coordinator_id} as dead and retrying with new coordinator...")
+            self.ring.mark_node_dead(coordinator_id)
+            
+            # Retry with new coordinator (will pick next alive node)
+            return self.coordinated_put(key, value, context)
     
     def coordinated_get(self, key: str):
         """
-        Coordinate GET operation with forwarding to coordinator.
+        Coordinate GET operation with forwarding to coordinator and READ REPAIR.
         Returns all concurrent versions if conflicts exist.
+        
+        Read Repair:
+        - Contacts ALL N replicas (not just R)
+        - Detects inconsistencies between replicas
+        - Asynchronously repairs outdated/missing replicas
         
         Returns:
             List of VersionedValue objects (may have multiple if conflict)
@@ -713,22 +731,26 @@ class Node:
             print(f"  [{self.node_id}] I'm not coordinator, forwarding to {coordinator}")
             return self.forward_get_to_coordinator(coordinator, key)
         
-        # Step 4: I AM the coordinator - handle read
-        print(f"  [{self.node_id}] I AM coordinator, handling read")
+        # Step 4: I AM the coordinator - handle read WITH READ REPAIR
+        print(f"  [{self.node_id}] I AM coordinator, handling read with read repair")
         
-        # Collect all versions from replicas
-        all_versions = []
-        success_count = 0
+        # Collect responses from ALL replicas (not just R) for read repair
+        all_responses = []  # List of {node_id, versions, found}
         
         for node_id in preference_list:
             try:
                 if node_id == self.node_id:
                     # Local read
                     versions = self.local_get(key)
+                    all_responses.append({
+                        'node_id': node_id,
+                        'versions': versions,
+                        'found': len(versions) > 0
+                    })
                     if versions:
-                        all_versions.extend(versions)
-                        success_count += 1
                         print(f"  [LOCAL {self.node_id}] Found {len(versions)} version(s)")
+                    else:
+                        print(f"  [LOCAL {self.node_id}] Key not found")
                 else:
                     # Remote read via gRPC
                     node_address = self.ring.nodes[node_id]['address']
@@ -740,25 +762,45 @@ class Node:
                     
                     if response.found:
                         # Convert proto versions to VersionedValue objects
+                        versions = []
                         for vv_proto in response.values:
                             vc = VectorClock.from_dict(dict(vv_proto.vector_clock.clock))
-                            all_versions.append(VersionedValue(key, vv_proto.value, vc))
-                        success_count += 1
-                        print(f"  ✓ {node_id} returned {len(response.values)} version(s)")
+                            versions.append(VersionedValue(key, vv_proto.value, vc))
+                        
+                        all_responses.append({
+                            'node_id': node_id,
+                            'versions': versions,
+                            'found': True
+                        })
+                        print(f"  ✓ {node_id} returned {len(versions)} version(s)")
+                    else:
+                        all_responses.append({
+                            'node_id': node_id,
+                            'versions': [],
+                            'found': False
+                        })
+                        print(f"  ✗ {node_id} does not have key")
                     
                     channel.close()
-                
-                # Stop once we have R responses
-                if success_count >= self.R:
-                    break
                     
             except Exception as e:
                 print(f"  ✗ Error retrieving from node {node_id}: {e}")
+                all_responses.append({
+                    'node_id': node_id,
+                    'versions': [],
+                    'found': False
+                })
         
-        # Check read quorum
-        if success_count < self.R:
-            print(f"  ✗ Read quorum failed: {success_count}/{self.R}")
+        # Check read quorum (need R successful responses)
+        successful_responses = [r for r in all_responses if r['found']]
+        if len(successful_responses) < self.R:
+            print(f"  ✗ Read quorum failed: {len(successful_responses)}/{self.R}")
             return []
+        
+        # Collect all versions from successful responses
+        all_versions = []
+        for response in successful_responses:
+            all_versions.extend(response['versions'])
         
         # Resolve conflicts (remove dominated versions)
         resolved = resolve_conflicts(all_versions)
@@ -770,7 +812,170 @@ class Node:
         else:
             print(f"  ✓ No conflicts, returning 1 version")
         
+        # CRITICAL: Trigger read repair ASYNCHRONOUSLY (non-blocking)
+        # This happens AFTER we return to the client
+        if resolved:
+            threading.Thread(
+                target=self.trigger_read_repair,
+                args=(key, resolved, all_responses),
+                daemon=True
+            ).start()
+        
         return resolved
+    
+    # ============================================
+    # READ REPAIR Implementation
+    # ============================================
+    
+    def trigger_read_repair(self, key: str, winning_versions: list, all_responses: list):
+        """
+        Asynchronous read repair - pushes winning versions to outdated replicas.
+        
+        Args:
+            key: The key that was read
+            winning_versions: List of VersionedValue objects that are current
+            all_responses: List of all responses from replicas
+        """
+        print(f"\n[READ REPAIR {self.node_id}] Starting repair for key: {key}")
+        
+        for response in all_responses:
+            node_id = response['node_id']
+            node_versions = response['versions']
+            node_found = response['found']
+            
+            # Don't skip self! We might need to repair ourselves if we just recovered
+            # (e.g., we crashed, restarted empty, and are now coordinator)
+            
+            # Case 1: Node is missing the key entirely
+            if not node_found:
+                print(f"  [REPAIR] Node {node_id} is missing key, sending all versions")
+                for winner in winning_versions:
+                    if node_id == self.node_id:
+                        # Repair ourselves locally (don't send over network)
+                        self.local_put(winner.key, winner.value, winner.vector_clock)
+                        print(f"  ✓ Repaired SELF: {winner.key} = {winner.value}")
+                    else:
+                        # Repair remote node
+                        self.send_repair_to_node(node_id, key, winner)
+                continue
+            
+            # Case 2: Node has outdated or different versions
+            # Check if node needs repair by comparing with winners
+            needs_repair = self.node_needs_repair(node_versions, winning_versions)
+            
+            if needs_repair:
+                print(f"  [REPAIR] Node {node_id} has outdated version, updating")
+                for winner in winning_versions:
+                    # Only send if node doesn't already have this exact version
+                    if not self.node_has_version(node_versions, winner):
+                        if node_id == self.node_id:
+                            # Repair ourselves locally
+                            self.local_put(winner.key, winner.value, winner.vector_clock)
+                            print(f"  ✓ Repaired SELF: {winner.key} = {winner.value}")
+                        else:
+                            # Repair remote node
+                            self.send_repair_to_node(node_id, key, winner)
+            else:
+                if node_id == self.node_id:
+                    print(f"  [REPAIR] SELF is up-to-date, no repair needed")
+                else:
+                    print(f"  [REPAIR] Node {node_id} is up-to-date, no repair needed")
+    
+    def node_needs_repair(self, node_versions: list, winning_versions: list) -> bool:
+        """
+        Check if a node needs repair by comparing its versions with winners.
+        
+        Returns True if:
+        - Node is missing any winning version
+        - Node has a version that is dominated by a winner
+        """
+        # If node has no versions but there are winners, needs repair
+        if not node_versions and winning_versions:
+            return True
+        
+        # Check if node is missing any winning version
+        for winner in winning_versions:
+            if not self.node_has_version(node_versions, winner):
+                return True
+        
+        # Check if node has any dominated (outdated) versions
+        for node_ver in node_versions:
+            for winner_ver in winning_versions:
+                if node_ver.vector_clock != winner_ver.vector_clock:
+                    # Check if winner dominates node's version
+                    if self.vclock_dominates(winner_ver.vector_clock, node_ver.vector_clock):
+                        return True
+        
+        return False
+    
+    def node_has_version(self, node_versions: list, target: VersionedValue) -> bool:
+        """Check if node has a specific version (same vector clock and value)."""
+        for v in node_versions:
+            if v.vector_clock == target.vector_clock and v.value == target.value:
+                return True
+        return False
+    
+    def vclock_dominates(self, vc1: VectorClock, vc2: VectorClock) -> bool:
+        """
+        Check if vc1 dominates vc2 (vc1 is strictly newer).
+        
+        vc1 dominates vc2 if:
+        - For all nodes, vc1[node] >= vc2[node]
+        - For at least one node, vc1[node] > vc2[node]
+        """
+        at_least_one_greater = False
+        
+        all_nodes = set(vc1.clock.keys()) | set(vc2.clock.keys())
+        
+        for node in all_nodes:
+            v1 = vc1.clock.get(node, 0)
+            v2 = vc2.clock.get(node, 0)
+            
+            if v1 < v2:
+                return False  # vc2 has something vc1 doesn't
+            elif v1 > v2:
+                at_least_one_greater = True
+        
+        return at_least_one_greater
+    
+    def send_repair_to_node(self, node_id: str, key: str, versioned_value: VersionedValue) -> bool:
+        """
+        Send a repair (PUT) to a specific node.
+        
+        Args:
+            node_id: Node to repair
+            key: Key to repair
+            versioned_value: The correct version to send
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            node_address = self.ring.nodes[node_id]['address']
+            channel = grpc.insecure_channel(node_address)
+            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+            
+            # Send repair as a ReplicatePut
+            vc_proto = dynamo_pb2.VectorClock(clock=versioned_value.vector_clock.to_dict())
+            request = dynamo_pb2.ReplicatePutRequest(
+                key=key,
+                value=versioned_value.value,
+                vector_clock=vc_proto
+            )
+            
+            response = stub.ReplicatePut(request, timeout=2)
+            channel.close()
+            
+            if response.success:
+                print(f"  ✓ Repaired {node_id}: {key} = {versioned_value.value}")
+                return True
+            else:
+                print(f"  ✗ Failed to repair {node_id}")
+                return False
+                
+        except Exception as e:
+            print(f"  ✗ Error repairing {node_id}: {e}")
+            return False
     
     def forward_get_to_coordinator(self, coordinator_id: str, key: str):
         """
@@ -789,7 +994,7 @@ class Node:
             stub = dynamo_pb2_grpc.NodeServiceStub(channel)
             
             request = dynamo_pb2.GetRequest(key=key)
-            response = stub.CoordinateGet(request, timeout=5)
+            response = stub.CoordinateGet(request, timeout=1)  # Fast timeout for quick failover
             
             channel.close()
             
@@ -807,8 +1012,13 @@ class Node:
                 return []
                 
         except Exception as e:
-            print(f"  ✗ Failed to forward to coordinator {coordinator_id}: {e}")
-            return []
+            # Coordinator is unreachable - mark as dead immediately and retry
+            print(f"  ✗ Coordinator {coordinator_id} unreachable: {e}")
+            print(f"  🔄 Marking {coordinator_id} as dead and retrying with new coordinator...")
+            self.ring.mark_node_dead(coordinator_id)
+            
+            # Retry with new coordinator (will pick next alive node)
+            return self.coordinated_get(key)
     
     # ============================================
     # Handle Internal Replication Requests
