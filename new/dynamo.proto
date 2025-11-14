@@ -119,6 +119,21 @@ message GossipPong {
 }
 
 // ============================================
+// Anti-Entropy Messages (Merkle Trees)
+// ============================================
+
+message GetAllKeysRequest {}
+
+message KeyData {
+    string key = 1;
+    repeated VersionedValue versions = 2;
+}
+
+message GetAllKeysResponse {
+    repeated KeyData keys = 1;
+}
+
+// ============================================
 // Service Definitions
 // ============================================
 
@@ -132,6 +147,19 @@ service NodeService {
     rpc ReplicateGet(ReplicateGetRequest) returns (ReplicateGetResponse);
     rpc ReplicatePut(ReplicatePutRequest) returns (ReplicatePutResponse);
     
-    // Gossip protocol - FIXED: renamed method to Gossip (was GossipPing)
+    // Coordinator forwarding
+    rpc CoordinatePut(PutRequest) returns (PutResponse);
+    rpc CoordinateGet(GetRequest) returns (GetResponse);
+    
+    // Hinted handoff
+    rpc ReceiveHint(HintedHandoff) returns (HintResponse);
+    
+    // Gossip protocol
     rpc Gossip(GossipPing) returns (GossipPong);
+    
+    // Cluster discovery
+    rpc GetCluster(GetClusterRequest) returns (GetClusterResponse);
+    
+    // Anti-entropy (Merkle tree sync)
+    rpc GetAllKeys(GetAllKeysRequest) returns (GetAllKeysResponse);
 }

@@ -176,6 +176,21 @@ class NodeServiceStub(object):
                 request_serializer=dynamo__pb2.ReplicatePutRequest.SerializeToString,
                 response_deserializer=dynamo__pb2.ReplicatePutResponse.FromString,
                 _registered_method=True)
+        self.CoordinatePut = channel.unary_unary(
+                '/dynamo.NodeService/CoordinatePut',
+                request_serializer=dynamo__pb2.PutRequest.SerializeToString,
+                response_deserializer=dynamo__pb2.PutResponse.FromString,
+                _registered_method=True)
+        self.CoordinateGet = channel.unary_unary(
+                '/dynamo.NodeService/CoordinateGet',
+                request_serializer=dynamo__pb2.GetRequest.SerializeToString,
+                response_deserializer=dynamo__pb2.GetResponse.FromString,
+                _registered_method=True)
+        self.ReceiveHint = channel.unary_unary(
+                '/dynamo.NodeService/ReceiveHint',
+                request_serializer=dynamo__pb2.HintedHandoff.SerializeToString,
+                response_deserializer=dynamo__pb2.HintResponse.FromString,
+                _registered_method=True)
         self.Gossip = channel.unary_unary(
                 '/dynamo.NodeService/Gossip',
                 request_serializer=dynamo__pb2.GossipPing.SerializeToString,
@@ -186,15 +201,10 @@ class NodeServiceStub(object):
                 request_serializer=dynamo__pb2.GetClusterRequest.SerializeToString,
                 response_deserializer=dynamo__pb2.GetClusterResponse.FromString,
                 _registered_method=True)
-        self.CoordinatePut = channel.unary_unary(
-                '/dynamo.NodeService/CoordinatePut',
-                request_serializer=dynamo__pb2.PutRequest.SerializeToString,
-                response_deserializer=dynamo__pb2.PutResponse.FromString,
-                _registered_method=True)
-        self.CoordinateGet = channel.unary_unary(
-                '/dynamo.NodeService/CoordinateGet',
-                request_serializer=dynamo__pb2.GetRequest.SerializeToString,
-                response_deserializer=dynamo__pb2.GetResponse.FromString,
+        self.GetAllKeys = channel.unary_unary(
+                '/dynamo.NodeService/GetAllKeys',
+                request_serializer=dynamo__pb2.GetAllKeysRequest.SerializeToString,
+                response_deserializer=dynamo__pb2.GetAllKeysResponse.FromString,
                 _registered_method=True)
 
 
@@ -219,6 +229,26 @@ class NodeServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CoordinatePut(self, request, context):
+        """Coordinator forwarding
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CoordinateGet(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ReceiveHint(self, request, context):
+        """Hinted handoff
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def Gossip(self, request, context):
         """Gossip protocol
         """
@@ -227,22 +257,15 @@ class NodeServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def GetCluster(self, request, context):
-        """Cluster discovery for clients
-        ← THIS LINE
+        """Cluster discovery
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def CoordinatePut(self, request, context):
-        """Forwarding to coordinator (internal node-to-node)
+    def GetAllKeys(self, request, context):
+        """Anti-entropy (Merkle tree sync)
         """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def CoordinateGet(self, request, context):
-        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -265,6 +288,21 @@ def add_NodeServiceServicer_to_server(servicer, server):
                     request_deserializer=dynamo__pb2.ReplicatePutRequest.FromString,
                     response_serializer=dynamo__pb2.ReplicatePutResponse.SerializeToString,
             ),
+            'CoordinatePut': grpc.unary_unary_rpc_method_handler(
+                    servicer.CoordinatePut,
+                    request_deserializer=dynamo__pb2.PutRequest.FromString,
+                    response_serializer=dynamo__pb2.PutResponse.SerializeToString,
+            ),
+            'CoordinateGet': grpc.unary_unary_rpc_method_handler(
+                    servicer.CoordinateGet,
+                    request_deserializer=dynamo__pb2.GetRequest.FromString,
+                    response_serializer=dynamo__pb2.GetResponse.SerializeToString,
+            ),
+            'ReceiveHint': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReceiveHint,
+                    request_deserializer=dynamo__pb2.HintedHandoff.FromString,
+                    response_serializer=dynamo__pb2.HintResponse.SerializeToString,
+            ),
             'Gossip': grpc.unary_unary_rpc_method_handler(
                     servicer.Gossip,
                     request_deserializer=dynamo__pb2.GossipPing.FromString,
@@ -275,15 +313,10 @@ def add_NodeServiceServicer_to_server(servicer, server):
                     request_deserializer=dynamo__pb2.GetClusterRequest.FromString,
                     response_serializer=dynamo__pb2.GetClusterResponse.SerializeToString,
             ),
-            'CoordinatePut': grpc.unary_unary_rpc_method_handler(
-                    servicer.CoordinatePut,
-                    request_deserializer=dynamo__pb2.PutRequest.FromString,
-                    response_serializer=dynamo__pb2.PutResponse.SerializeToString,
-            ),
-            'CoordinateGet': grpc.unary_unary_rpc_method_handler(
-                    servicer.CoordinateGet,
-                    request_deserializer=dynamo__pb2.GetRequest.FromString,
-                    response_serializer=dynamo__pb2.GetResponse.SerializeToString,
+            'GetAllKeys': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAllKeys,
+                    request_deserializer=dynamo__pb2.GetAllKeysRequest.FromString,
+                    response_serializer=dynamo__pb2.GetAllKeysResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -378,6 +411,87 @@ class NodeService(object):
             _registered_method=True)
 
     @staticmethod
+    def CoordinatePut(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dynamo.NodeService/CoordinatePut',
+            dynamo__pb2.PutRequest.SerializeToString,
+            dynamo__pb2.PutResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CoordinateGet(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dynamo.NodeService/CoordinateGet',
+            dynamo__pb2.GetRequest.SerializeToString,
+            dynamo__pb2.GetResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReceiveHint(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/dynamo.NodeService/ReceiveHint',
+            dynamo__pb2.HintedHandoff.SerializeToString,
+            dynamo__pb2.HintResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
     def Gossip(request,
             target,
             options=(),
@@ -432,7 +546,7 @@ class NodeService(object):
             _registered_method=True)
 
     @staticmethod
-    def CoordinatePut(request,
+    def GetAllKeys(request,
             target,
             options=(),
             channel_credentials=None,
@@ -445,36 +559,9 @@ class NodeService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/dynamo.NodeService/CoordinatePut',
-            dynamo__pb2.PutRequest.SerializeToString,
-            dynamo__pb2.PutResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def CoordinateGet(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/dynamo.NodeService/CoordinateGet',
-            dynamo__pb2.GetRequest.SerializeToString,
-            dynamo__pb2.GetResponse.FromString,
+            '/dynamo.NodeService/GetAllKeys',
+            dynamo__pb2.GetAllKeysRequest.SerializeToString,
+            dynamo__pb2.GetAllKeysResponse.FromString,
             options,
             channel_credentials,
             insecure,

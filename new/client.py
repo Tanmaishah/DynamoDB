@@ -200,7 +200,7 @@ class DynamoClient:
                 if context:
                     request.context.CopyFrom(context)
                 
-                response = stub.Put(request, timeout=2)
+                response = stub.Put(request, timeout=5)
                 
                 channel.close()
                 
@@ -272,7 +272,7 @@ class DynamoClient:
         
         for node_addr in nodes:
             try:
-                print(f"  Trying {node_addr}...", end=" ", flush=True)
+                # print(f"  Trying {node_addr}...", end=" ", flush=True)
                 
                 channel = grpc.insecure_channel(node_addr)
                 stub = dynamo_pb2_grpc.DynamoServiceStub(channel)

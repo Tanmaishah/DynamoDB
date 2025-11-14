@@ -5,6 +5,7 @@ import grpc
 import dynamo_pb2
 import dynamo_pb2_grpc
 from vector_clock import VectorClock, VersionedValue, resolve_conflicts
+from merkle_tree import MerkleTree
 import time
 import threading
 import random
@@ -63,7 +64,7 @@ class HashRing:
                 was_alive = self.nodes[node]['is_alive']
                 self.nodes[node]['is_alive'] = False
                 if was_alive:  # Only print if state changed
-                    print(f"\n⚠️  [{time.strftime('%H:%M:%S')}] Node {node} marked as DEAD (no response for {self.FAILURE_THRESHOLD:.0f}s)")
+                    print(f"\n⚠️  [{time.strftime('%H:%M:%S')}] Node {node} marked as DEAD")
     
     def mark_node_alive(self, node):
         """Mark a node as alive and update last_seen."""
@@ -91,13 +92,13 @@ class HashRing:
                         remote_info['capacity'],
                         remote_info['address']
                     )
-                    print(f"  [GOSSIP] Learned about new node: {node_id}")
+                    # Learned about new node (silent)
                 else:
                     # Update if remote info is newer
                     local_info = self.nodes[node_id]
                     if remote_info['last_seen'] > local_info['last_seen']:
                         self.nodes[node_id].update(remote_info)
-                        print(f"  [GOSSIP] Updated {node_id} from gossip")
+                        # Updated from gossip (silent)
     
     def get_preference_list(self, key: str, N: int = 3):
         """Get N unique ALIVE nodes responsible for this key."""
@@ -117,6 +118,32 @@ class HashRing:
                 node_id = self.ring[curr_index][1]
                 # Only add alive nodes
                 if node_id not in seen and self.nodes[node_id]['is_alive']:
+                    preference_list.append(node_id)
+                    seen.add(node_id)
+                attempts += 1
+            return preference_list
+    
+    def get_preference_list_with_dead(self, key: str, N: int = 3):
+        """
+        Get N unique nodes responsible for this key, INCLUDING dead nodes.
+        Used for hinted handoff - we want to try dead nodes and store hints.
+        """
+        with self.lock:
+            if not self.ring:
+                return []
+            pos = hash_string(key)
+            positions = [p for p, _ in self.ring]
+            idx = bisect.bisect_right(positions, pos)
+            if idx == len(self.ring):
+                idx = 0
+            preference_list = []
+            seen = set()
+            attempts = 0
+            while len(preference_list) < N and attempts < len(self.ring):
+                curr_index = (idx + attempts) % len(self.ring)
+                node_id = self.ring[curr_index][1]
+                # Add ALL nodes (dead or alive) for hinted handoff
+                if node_id not in seen:
                     preference_list.append(node_id)
                     seen.add(node_id)
                 attempts += 1
@@ -163,9 +190,13 @@ class Node:
         
         # Gossip configuration
         self.GOSSIP_INTERVAL = 1.0  # seconds
-        self.FAILURE_THRESHOLD = 3.0  # seconds - mark dead if no response (faster detection)
+        self.FAILURE_THRESHOLD = 10.0  # seconds - mark dead if no response
         self.gossip_thread = None
         self.running = False
+        
+        # Anti-entropy configuration
+        self.ANTI_ENTROPY_INTERVAL = 60  # 60 seconds for testing (change to 3600 for production)
+        self.anti_entropy_thread = None
         
         self.ring.add_node(self.node_id, self.capacity, self.address)
     
@@ -197,6 +228,11 @@ class Node:
         self.gossip_thread = threading.Thread(target=self.gossip_routine, daemon=True)
         self.gossip_thread.start()
         print(f"✓ Gossip protocol started")
+        
+        # Start anti-entropy protocol
+        self.anti_entropy_thread = threading.Thread(target=self.anti_entropy_routine, daemon=True)
+        self.anti_entropy_thread.start()
+        print(f"✓ Anti-entropy (Merkle tree sync) started (runs every {self.ANTI_ENTROPY_INTERVAL/60:.0f} minutes)")
     
     def stop(self, address=None):
         """Stop the node gracefully."""
@@ -222,13 +258,18 @@ class Node:
         """
         print(f"[GOSSIP] Starting gossip routine for {self.node_id}")
         
-        gossip_count = 0  # Counter for log throttling
-        LOG_EVERY_N_GOSSIPS = 900  # Print logs every 900 gossips (15 minutes if interval=1s)
+        gossip_count = 0
+        LOG_EVERY_N_GOSSIPS = 15  # Print logs every 15 gossips (15 seconds if interval=1s)
         
         while self.running:
             try:
                 gossip_count += 1
                 should_log = (gossip_count % LOG_EVERY_N_GOSSIPS == 0)
+                
+                # Print alive nodes every 15 seconds
+                if should_log:
+                    alive = self.ring.get_all_alive_nodes()
+                    print(f"\n[GOSSIP {self.node_id}] Alive nodes: {alive}\n")
                 
                 # Get all alive peers (excluding self)
                 peers = self.ring.get_all_alive_nodes()
@@ -290,19 +331,20 @@ class Node:
                     if should_log:
                         print(f"[GOSSIP {self.node_id}] No other nodes to gossip with")
                 
-                # Check for dead nodes (haven't heard from in FAILURE_THRESHOLD)
-                with self.ring.lock:
-                    current_time = time.time()
-                    for nid, info in self.ring.nodes.items():
-                        if nid != self.node_id and info['is_alive']:
-                            time_since_seen = current_time - info['last_seen']
-                            if time_since_seen > self.FAILURE_THRESHOLD:
-                                self.ring.mark_node_dead(nid)
-                
             except Exception as e:
                 # Gossip errors are expected when nodes are down
                 if should_log:
                     print(f"✗ (timeout/unreachable)")
+            
+            # CRITICAL: Check for dead nodes (OUTSIDE try-except so it always runs)
+            # This must run even if gossip ping fails!
+            with self.ring.lock:
+                current_time = time.time()
+                for nid, info in self.ring.nodes.items():
+                    if nid != self.node_id and info['is_alive']:
+                        time_since_seen = current_time - info['last_seen']
+                        if time_since_seen > self.FAILURE_THRESHOLD:
+                            self.ring.mark_node_dead(nid)
             
             time.sleep(self.GOSSIP_INTERVAL)
     
@@ -553,7 +595,7 @@ class Node:
         # Remove dominated versions (keep only concurrent ones)
         self.storage[key] = resolve_conflicts(self.storage[key])
         
-        print(f"  [LOCAL {self.node_id}] Stored {key} = {value} with VC={vector_clock}")
+        # Silent - only log errors
     
     def local_get(self, key: str) -> list:
         """Retrieve all versions of a key locally."""
@@ -581,8 +623,8 @@ class Node:
         """
         print(f"\n[{self.node_id}] Received PUT request: {key} = {value}")
         
-        # Step 1: Calculate preference list
-        preference_list = self.ring.get_preference_list(key, self.N)
+        # Step 1: Calculate preference list (INCLUDING dead nodes for hinted handoff)
+        preference_list = self.ring.get_preference_list_with_dead(key, self.N)
         
         if not preference_list:
             print(f"✗ No nodes available to store the key.")
@@ -590,8 +632,18 @@ class Node:
         
         print(f"  Preference list: {preference_list} (N={self.N})")
         
-        # Step 2: Determine coordinator (first in preference list)
-        coordinator = preference_list[0]
+        # Step 2: Determine coordinator (first ALIVE node in preference list)
+        coordinator = None
+        for node_id in preference_list:
+            if self.ring.nodes[node_id]['is_alive']:
+                coordinator = node_id
+                break
+        
+        if not coordinator:
+            print(f"✗ No alive coordinator found in preference list!")
+            return False, None
+        
+        print(f"  Coordinator: {coordinator}")
         
         # Step 3: Check if I am the coordinator
         if self.node_id != coordinator:
@@ -614,6 +666,8 @@ class Node:
         
         # Replicate to N nodes (including myself)
         success_count = 0
+        failed_nodes = []  # Track which nodes failed
+        
         for node_id in preference_list:
             try:
                 if node_id == self.node_id:
@@ -634,15 +688,25 @@ class Node:
                         vector_clock=vc_proto
                     )
                     
-                    response = stub.ReplicatePut(request, timeout=2)
+                    response = stub.ReplicatePut(request, timeout=0.5)  # Faster timeout
                     
                     if response.success:
                         success_count += 1
                         print(f"  ✓ Replicated to {node_id}")
+                    else:
+                        failed_nodes.append(node_id)
+                        print(f"  ✗ Failed to replicate to {node_id}")
                     
                     channel.close()
             except Exception as e:
+                failed_nodes.append(node_id)
                 print(f"  ✗ Error replicating to node {node_id}: {e}")
+        
+        # Hinted Handoff: Store hints for failed nodes
+        if failed_nodes and success_count >= self.W:
+            print(f"  [HINTED HANDOFF] {len(failed_nodes)} node(s) failed, storing hints")
+            for failed_node in failed_nodes:
+                self.store_hint(key, value, vc, failed_node)
         
         # Check write quorum
         if success_count >= self.W:
@@ -792,18 +856,55 @@ class Node:
                 })
         
         # Check read quorum (need R successful responses)
+        # Check read quorum (need R successful responses)
         successful_responses = [r for r in all_responses if r['found']]
         if len(successful_responses) < self.R:
             print(f"  ✗ Read quorum failed: {len(successful_responses)}/{self.R}")
-            return []
+            
+            # STILL trigger read repair to fix missing replicas (even though quorum failed)
+            if successful_responses:
+                all_versions = []
+                for response in successful_responses:
+                    all_versions.extend(response['versions'])
+                
+                # Deduplicate
+                seen = {}
+                deduplicated = []
+                for v in all_versions:
+                    key_tuple = (v.value, tuple(sorted(v.vector_clock.clock.items())))
+                    if key_tuple not in seen:
+                        seen[key_tuple] = True
+                        deduplicated.append(v)
+                
+                resolved = resolve_conflicts(deduplicated)
+                
+                # Trigger read repair asynchronously (even though quorum failed)
+                if resolved:
+                    print(f"  [READ REPAIR] Triggering repair despite quorum failure")
+                    threading.Thread(
+                        target=self.trigger_read_repair,
+                        args=(key, resolved, all_responses),
+                        daemon=True
+                    ).start()
+            
+            return []  # Still return empty to client (quorum not met)
         
         # Collect all versions from successful responses
         all_versions = []
         for response in successful_responses:
             all_versions.extend(response['versions'])
         
+        # Deduplicate: Remove identical versions (same value AND same vector clock)
+        seen = {}
+        deduplicated = []
+        for v in all_versions:
+            key_tuple = (v.value, tuple(sorted(v.vector_clock.clock.items())))
+            if key_tuple not in seen:
+                seen[key_tuple] = True
+                deduplicated.append(v)
+        
         # Resolve conflicts (remove dominated versions)
-        resolved = resolve_conflicts(all_versions)
+        resolved = resolve_conflicts(deduplicated)
         
         if len(resolved) > 1:
             print(f"  ⚠ CONFLICT DETECTED: {len(resolved)} concurrent versions!")
@@ -876,10 +977,8 @@ class Node:
                             # Repair remote node
                             self.send_repair_to_node(node_id, key, winner)
             else:
-                if node_id == self.node_id:
-                    print(f"  [REPAIR] SELF is up-to-date, no repair needed")
-                else:
-                    print(f"  [REPAIR] Node {node_id} is up-to-date, no repair needed")
+                # Silent if up-to-date
+                pass
     
     def node_needs_repair(self, node_versions: list, winning_versions: list) -> bool:
         """
@@ -976,6 +1075,393 @@ class Node:
         except Exception as e:
             print(f"  ✗ Error repairing {node_id}: {e}")
             return False
+    
+    # ============================================
+    # ANTI-ENTROPY (Merkle Tree Sync)
+    # ============================================
+    
+    def anti_entropy_routine(self):
+        """
+        Periodic anti-entropy using Merkle trees.
+        Runs every ANTI_ENTROPY_INTERVAL seconds (default: 1 hour).
+        """
+        print(f"[ANTI-ENTROPY] Starting anti-entropy routine for {self.node_id}")
+        print(f"[ANTI-ENTROPY] Will run every {self.ANTI_ENTROPY_INTERVAL/60:.0f} minutes")
+        
+        while self.running:
+            try:
+                time.sleep(self.ANTI_ENTROPY_INTERVAL)
+                
+                print(f"\n{'='*60}")
+                print(f"[ANTI-ENTROPY {self.node_id}] Starting sync round at {time.strftime('%H:%M:%S')}")
+                print(f"{'='*60}")
+                
+                # Get my N-1 successors to sync with
+                alive_nodes = self.ring.get_all_alive_nodes()
+                if len(alive_nodes) <= 1:
+                    print(f"[ANTI-ENTROPY {self.node_id}] No other nodes to sync with")
+                    continue
+                
+                # Sort nodes by position in ring
+                sorted_nodes = sorted(alive_nodes, key=lambda n: self.ring.nodes[n]['address'])
+                my_idx = sorted_nodes.index(self.node_id)
+                
+                # Sync with next N-1 nodes
+                successors_to_sync = []
+                for i in range(1, min(self.N, len(sorted_nodes))):
+                    successor_idx = (my_idx + i) % len(sorted_nodes)
+                    successor = sorted_nodes[successor_idx]
+                    if successor != self.node_id:
+                        successors_to_sync.append(successor)
+                
+                print(f"[ANTI-ENTROPY {self.node_id}] Syncing with {len(successors_to_sync)} successor(s): {successors_to_sync}")
+                
+                # Sync with each successor
+                for successor in successors_to_sync:
+                    try:
+                        self.compare_and_sync_with_node(successor)
+                    except Exception as e:
+                        print(f"[ANTI-ENTROPY {self.node_id}] ✗ Failed to sync with {successor}: {e}")
+                
+                print(f"[ANTI-ENTROPY {self.node_id}] Sync round complete")
+                print(f"{'='*60}\n")
+                
+            except Exception as e:
+                print(f"[ANTI-ENTROPY {self.node_id}] Error in anti-entropy routine: {e}")
+    
+    def get_all_responsible_ranges(self) -> list:
+        """
+        Get all hash ranges this node is responsible for (as coordinator or replica).
+        
+        Returns:
+            List of (start, end) tuples representing hash ranges
+        """
+        responsible_ranges = []
+        
+        # Get all unique node positions
+        node_positions = {}
+        for pos, node_id in self.ring.ring:
+            if node_id not in node_positions:
+                node_positions[node_id] = pos
+        
+        # Sort by position
+        sorted_positions = sorted(node_positions.items(), key=lambda x: x[1])
+        
+        # For each position, check if we're in the preference list
+        for i, (node_id, pos) in enumerate(sorted_positions):
+            # Calculate range for this position
+            start_pos = sorted_positions[i-1][1] if i > 0 else sorted_positions[-1][1]
+            end_pos = pos
+            
+            # Get preference list for this position
+            # We need to walk clockwise from start_pos to find N nodes
+            pref_list = self._get_preference_list_for_range(start_pos, end_pos)
+            
+            # If we're in the preference list, we're responsible for this range
+            if self.node_id in pref_list:
+                responsible_ranges.append((start_pos, end_pos))
+        
+        return responsible_ranges
+    
+    def _get_preference_list_for_range(self, start_pos: int, end_pos: int) -> list:
+        """
+        Get preference list for keys that hash to a specific range.
+        This is similar to get_preference_list but for a position range.
+        """
+        # Find the node at end_pos (coordinator for this range)
+        coordinator_idx = None
+        for i, (pos, node_id) in enumerate(self.ring.ring):
+            if pos == end_pos:
+                coordinator_idx = i
+                break
+        
+        if coordinator_idx is None:
+            return []
+        
+        # Walk clockwise from coordinator to get N nodes
+        pref_list = []
+        seen = set()
+        attempts = 0
+        
+        with self.ring.lock:
+            while len(pref_list) < self.N and attempts < len(self.ring.ring):
+                curr_idx = (coordinator_idx + attempts) % len(self.ring.ring)
+                node_id = self.ring.ring[curr_idx][1]
+                
+                if node_id not in seen and self.ring.nodes[node_id]['is_alive']:
+                    pref_list.append(node_id)
+                    seen.add(node_id)
+                
+                attempts += 1
+        
+        return pref_list
+    
+    def get_shared_token_ranges(self, other_node_id: str) -> list:
+        """
+        Find hash ranges where both this node and other_node should have replicas.
+        
+        Args:
+            other_node_id: ID of the other node
+            
+        Returns:
+            List of (start, end) tuples representing shared hash ranges
+        """
+        shared_ranges = []
+        
+        # Get all unique node positions
+        node_positions = {}
+        for pos, node_id in self.ring.ring:
+            if node_id not in node_positions:
+                node_positions[node_id] = pos
+        
+        # Sort by position
+        sorted_positions = sorted(node_positions.items(), key=lambda x: x[1])
+        
+        # For each position, check if BOTH nodes are in the preference list
+        for i, (node_id, pos) in enumerate(sorted_positions):
+            # Calculate range for this position
+            start_pos = sorted_positions[i-1][1] if i > 0 else sorted_positions[-1][1]
+            end_pos = pos
+            
+            # Get preference list for this range
+            pref_list = self._get_preference_list_for_range(start_pos, end_pos)
+            
+            # If BOTH nodes are in the preference list, this is a shared range
+            if self.node_id in pref_list and other_node_id in pref_list:
+                shared_ranges.append((start_pos, end_pos))
+        
+        return shared_ranges
+    
+    def is_hash_in_ranges(self, key_hash: int, ranges: list) -> bool:
+        """
+        Check if a key hash falls within any of the given ranges.
+        
+        Args:
+            key_hash: Hash value of the key
+            ranges: List of (start, end) tuples
+            
+        Returns:
+            True if key_hash is in any range
+        """
+        for start, end in ranges:
+            if start < end:
+                # Normal range
+                if start <= key_hash < end:
+                    return True
+            else:
+                # Wrap-around range (e.g., [400, 100] wraps around 0)
+                if key_hash >= start or key_hash < end:
+                    return True
+        return False
+    
+    def build_merkle_tree_for_comparison(self, other_node_id: str) -> MerkleTree:
+        """
+        Build a Merkle tree containing only keys shared with another node.
+        
+        Args:
+            other_node_id: ID of the node to compare with
+            
+        Returns:
+            MerkleTree containing only shared keys
+        """
+        # Get shared token ranges
+        shared_ranges = self.get_shared_token_ranges(other_node_id)
+        
+        # Filter keys to only those in shared ranges
+        shared_keys = []
+        for key, versions in self.storage.items():
+            key_hash = hash_string(key)
+            if self.is_hash_in_ranges(key_hash, shared_ranges):
+                # This key should be on both nodes
+                shared_keys.extend(versions)
+        
+        # Build Merkle tree from shared keys
+        merkle_tree = MerkleTree(num_buckets=256)
+        merkle_tree.build(shared_keys)
+        
+        return merkle_tree
+    
+    def compare_and_sync_with_node(self, other_node_id: str):
+        """
+        Compare Merkle trees with another node and sync differences.
+        
+        Args:
+            other_node_id: ID of the node to sync with
+        """
+        print(f"\n[MERKLE SYNC {self.node_id} ↔ {other_node_id}] Starting comparison...")
+        
+        try:
+            # Check if other node is alive
+            if not self.ring.nodes[other_node_id]['is_alive']:
+                print(f"  Skipping {other_node_id} (node is dead)")
+                return
+            
+            # Get shared ranges
+            shared_ranges = self.get_shared_token_ranges(other_node_id)
+            
+            if not shared_ranges:
+                print(f"  No shared ranges with {other_node_id}, skipping")
+                return
+            
+            print(f"  Shared ranges: {len(shared_ranges)} range(s)")
+            
+            # Build our Merkle tree for shared keys
+            my_tree = self.build_merkle_tree_for_comparison(other_node_id)
+            print(f"  Built local tree: {my_tree}")
+            
+            # Get the other node's tree
+            # For now, we'll build it ourselves by requesting all keys in shared ranges
+            # In production, we'd exchange tree structures, but for simplicity we'll
+            # just compare keys directly
+            
+            # Request all keys in shared ranges from other node
+            other_keys = self.request_keys_in_ranges(other_node_id, shared_ranges)
+            
+            # Build tree from other node's keys
+            other_tree = MerkleTree(num_buckets=256)
+            other_tree.build(other_keys)
+            print(f"  Built remote tree: {other_tree}")
+            
+            # Compare trees
+            if my_tree.get_root_hash() == other_tree.get_root_hash():
+                print(f"  ✓ Trees match! No sync needed.")
+                return
+            
+            print(f"  ✗ Trees differ! Finding differences...")
+            
+            # Find differing buckets
+            differing_buckets = my_tree.find_differing_buckets(other_tree)
+            print(f"  Found {len(differing_buckets)} differing bucket(s)")
+            
+            # Sync each differing bucket
+            keys_synced = 0
+            for bucket_idx in differing_buckets:
+                my_keys = my_tree.get_keys_in_bucket(bucket_idx)
+                other_keys_in_bucket = other_tree.get_keys_in_bucket(bucket_idx)
+                
+                # Compare and sync this bucket
+                synced = self.sync_bucket(other_node_id, my_keys, other_keys_in_bucket)
+                keys_synced += synced
+            
+            if keys_synced > 0:
+                print(f"  ✓ Synced {keys_synced} key(s) with {other_node_id}")
+            else:
+                print(f"  ✓ No keys needed syncing (versions matched)")
+            
+        except Exception as e:
+            print(f"  ✗ Error during Merkle sync: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def request_keys_in_ranges(self, node_id: str, ranges: list) -> list:
+        """
+        Request all keys in specific hash ranges from another node.
+        
+        Args:
+            node_id: Node to request from
+            ranges: List of (start, end) hash ranges
+            
+        Returns:
+            List of VersionedValue objects from that node
+        """
+        all_keys = []
+        
+        try:
+            node_address = self.ring.nodes[node_id]['address']
+            channel = grpc.insecure_channel(node_address)
+            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+            
+            # For simplicity, we'll request ALL keys and filter locally
+            # In production, we'd send the ranges and have the other node filter
+            request = dynamo_pb2.GetAllKeysRequest()
+            response = stub.GetAllKeys(request, timeout=10)
+            
+            # Convert proto to VersionedValue objects
+            for key_data in response.keys:
+                for vv_proto in key_data.versions:
+                    vc = VectorClock.from_dict(dict(vv_proto.vector_clock.clock))
+                    vv = VersionedValue(key_data.key, vv_proto.value, vc)
+                    
+                    # Check if this key is in our shared ranges
+                    key_hash = hash_string(vv.key)
+                    if self.is_hash_in_ranges(key_hash, ranges):
+                        all_keys.append(vv)
+            
+            channel.close()
+            
+        except Exception as e:
+            # Simplified error (node likely dead)
+            print(f"  ✗ Cannot reach {node_id} (connection failed)")
+        
+        return all_keys
+    
+    def sync_bucket(self, other_node_id: str, my_keys: list, other_keys: list) -> int:
+        """
+        Sync a single bucket of keys with another node.
+        Compares vector clocks and updates both nodes as needed.
+        
+        Args:
+            other_node_id: Node to sync with
+            my_keys: VersionedValues I have in this bucket
+            other_keys: VersionedValues other node has in this bucket
+            
+        Returns:
+            Number of keys synced
+        """
+        synced_count = 0
+        
+        # Build maps for easier lookup
+        my_map = {vv.key: vv for vv in my_keys}
+        other_map = {vv.key: vv for vv in other_keys}
+        
+        # All unique keys
+        all_keys = set(my_map.keys()) | set(other_map.keys())
+        
+        for key in all_keys:
+            my_version = my_map.get(key)
+            other_version = other_map.get(key)
+            
+            # Case 1: I have it, they don't
+            if my_version and not other_version:
+                self.send_repair_to_node(other_node_id, key, my_version)
+                synced_count += 1
+            
+            # Case 2: They have it, I don't
+            elif other_version and not my_version:
+                self.local_put(other_version.key, other_version.value, other_version.vector_clock)
+                synced_count += 1
+            
+            # Case 3: Both have it - compare vector clocks
+            elif my_version and other_version:
+                if my_version.vector_clock != other_version.vector_clock:
+                    # Determine which version is newer
+                    if self.vclock_dominates(my_version.vector_clock, other_version.vector_clock):
+                        # My version is newer, send to them
+                        self.send_repair_to_node(other_node_id, key, my_version)
+                        synced_count += 1
+                    elif self.vclock_dominates(other_version.vector_clock, my_version.vector_clock):
+                        # Their version is newer, update myself
+                        self.local_put(other_version.key, other_version.value, other_version.vector_clock)
+                        synced_count += 1
+                    # else: concurrent versions - both keep their versions (conflict)
+        
+        return synced_count
+    
+    def handle_get_all_keys(self):
+        """
+        Handle GetAllKeys request - return all keys this node stores.
+        Used for Merkle tree comparison.
+        
+        Returns:
+            List of all keys with their versions
+        """
+        all_keys = []
+        for key, versions in self.storage.items():
+            all_keys.append({
+                'key': key,
+                'versions': versions
+            })
+        return all_keys
     
     def forward_get_to_coordinator(self, coordinator_id: str, key: str):
         """
@@ -1145,6 +1631,48 @@ class NodeServicer(dynamo_pb2_grpc.NodeServiceServicer):
             return dynamo_pb2.GetResponse(found=True, values=values_proto)
         else:
             return dynamo_pb2.GetResponse(found=False)
+    
+    def GetAllKeys(self, request, context):
+        """
+        Handle GetAllKeys request for Merkle tree comparison.
+        Returns all keys this node stores.
+        """
+        all_keys_data = self.node.handle_get_all_keys()
+        
+        # Convert to proto
+        keys_proto = []
+        for key_data in all_keys_data:
+            # Convert versions to proto
+            versions_proto = []
+            for vv in key_data['versions']:
+                vc_proto = dynamo_pb2.VectorClock(clock=vv.vector_clock.to_dict())
+                vv_proto = dynamo_pb2.VersionedValue(
+                    value=vv.value,
+                    vector_clock=vc_proto
+                )
+                versions_proto.append(vv_proto)
+            
+            # Create KeyData proto
+            key_proto = dynamo_pb2.KeyData(
+                key=key_data['key'],
+                versions=versions_proto
+            )
+            keys_proto.append(key_proto)
+        
+        return dynamo_pb2.GetAllKeysResponse(keys=keys_proto)
+    
+    def ReceiveHint(self, request, context):
+        """
+        Handle hinted handoff from another node.
+        This node was down and is now receiving data it missed.
+        """
+        # Convert proto vector clock to VectorClock object
+        vc = VectorClock.from_dict(dict(request.vector_clock.clock))
+        
+        # Store the hint as regular data
+        success = self.node.receive_hint(request.key, request.value, vc)
+        
+        return dynamo_pb2.HintResponse(success=success)
 
 
 class DynamoServicer(dynamo_pb2_grpc.DynamoServiceServicer):
