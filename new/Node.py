@@ -189,13 +189,13 @@ class Node:
         self.W = 2  # write quorum
         
         # Gossip configuration
-        self.GOSSIP_INTERVAL = 1.0  # seconds
-        self.FAILURE_THRESHOLD = 10.0  # seconds - mark dead if no response
+        self.GOSSIP_INTERVAL = 2.0  # 2 seconds - reduces network traffic for larger clusters
+        self.FAILURE_THRESHOLD = 10.0  # 10 seconds - mark dead if no response
         self.gossip_thread = None
         self.running = False
         
         # Anti-entropy configuration
-        self.ANTI_ENTROPY_INTERVAL = 60  # 60 seconds for testing (change to 3600 for production)
+        self.ANTI_ENTROPY_INTERVAL = 180  # 10 seconds for testing (change to 3600 for production)
         self.anti_entropy_thread = None
         
         self.ring.add_node(self.node_id, self.capacity, self.address)
@@ -259,7 +259,7 @@ class Node:
         print(f"[GOSSIP] Starting gossip routine for {self.node_id}")
         
         gossip_count = 0
-        LOG_EVERY_N_GOSSIPS = 15  # Print logs every 15 gossips (15 seconds if interval=1s)
+        LOG_EVERY_N_GOSSIPS = 10  # Print logs every 10 gossips (20 seconds if interval=2s)
         
         while self.running:
             try:
@@ -434,59 +434,45 @@ class Node:
             hints_to_forward = []
             
             # Find all hints for this node
-            for key, hint in self.hints.items():
+            for key, hint in list(self.hints.items()):
                 if hint['intended_for'] == recovered_node_id:
                     hints_to_forward.append((key, hint))
             
             if not hints_to_forward:
                 return  # No hints for this node
             
-            print(f"\n[HINT FORWARDING] Node {recovered_node_id} recovered, forwarding {len(hints_to_forward)} hint(s)...")
+            print(f"  [HINT FORWARDING] Found {len(hints_to_forward)} hint(s) for {recovered_node_id}")
             
-            # Forward each hint
+            # Forward hints to recovered node
+            node_address = self.ring.nodes[recovered_node_id]['address']
+            success_count = 0
+            
             for key, hint in hints_to_forward:
-                success = self.forward_hint_to_node(recovered_node_id, key, hint)
-                if success:
-                    # Delete hint after successful forward
-                    del self.hints[key]
-                    print(f"  ✓ Forwarded and deleted hint for {key}")
-                else:
-                    print(f"  ✗ Failed to forward hint for {key}, will retry later")
-    
-    def forward_hint_to_node(self, node_id: str, key: str, hint: dict) -> bool:
-        """
-        Forward a single hint to the recovered node.
-        
-        Args:
-            node_id: Node to forward hint to
-            key: Key of the hint
-            hint: Hint data dict
+                try:
+                    channel = grpc.insecure_channel(node_address)
+                    stub = dynamo_pb2_grpc.NodeServiceStub(channel)
+                    
+                    vc_proto = dynamo_pb2.VectorClock(clock=hint['vector_clock'].to_dict())
+                    request = dynamo_pb2.ReplicatePutRequest(
+                        key=key,
+                        value=hint['value'],
+                        vector_clock=vc_proto
+                    )
+                    
+                    response = stub.ReplicatePut(request, timeout=1)
+                    
+                    if response.success:
+                        success_count += 1
+                        # Remove hint after successful forward
+                        del self.hints[key]
+                    
+                    channel.close()
+                    
+                except Exception as e:
+                    print(f"  ✗ Failed to forward hint {key} to {recovered_node_id}: {e}")
             
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            node_address = self.ring.nodes[node_id]['address']
-            channel = grpc.insecure_channel(node_address)
-            stub = dynamo_pb2_grpc.NodeServiceStub(channel)
-            
-            # Build hint message
-            vc_proto = dynamo_pb2.VectorClock(clock=hint['vector_clock'].to_dict())
-            request = dynamo_pb2.HintedHandoff(
-                key=key,
-                value=hint['value'],
-                vector_clock=vc_proto,
-                intended_for=hint['intended_for']
-            )
-            
-            response = stub.ReceiveHint(request, timeout=3)
-            channel.close()
-            
-            return response.success
-            
-        except Exception as e:
-            print(f"  ✗ Error forwarding hint to {node_id}: {e}")
-            return False
+            if success_count > 0:
+                print(f"  ✓ Successfully forwarded {success_count}/{len(hints_to_forward)} hints to {recovered_node_id}")
     
     def receive_hint(self, key: str, value: str, vector_clock: VectorClock) -> bool:
         """
@@ -664,16 +650,17 @@ class Node:
             vc.increment(self.node_id)
             print(f"  New vector clock: {vc}")
         
-        # Replicate to N nodes (including myself)
+        # Replicate to N nodes (including myself) - IN PARALLEL!
         success_count = 0
-        failed_nodes = []  # Track which nodes failed
+        failed_nodes = []
         
-        for node_id in preference_list:
+        def replicate_to_node(node_id, results):
+            """Helper function to replicate to a single node."""
             try:
                 if node_id == self.node_id:
                     # Local write (I'm in preference list)
                     self.local_put(key, value, vc)
-                    success_count += 1
+                    results[node_id] = {'success': True, 'error': None}
                 else:
                     # Remote write via gRPC
                     node_address = self.ring.nodes[node_id]['address']
@@ -688,19 +675,50 @@ class Node:
                         vector_clock=vc_proto
                     )
                     
-                    response = stub.ReplicatePut(request, timeout=0.5)  # Faster timeout
+                    response = stub.ReplicatePut(request, timeout=0.1)
                     
                     if response.success:
-                        success_count += 1
-                        print(f"  ✓ Replicated to {node_id}")
+                        results[node_id] = {'success': True, 'error': None}
                     else:
-                        failed_nodes.append(node_id)
-                        print(f"  ✗ Failed to replicate to {node_id}")
+                        results[node_id] = {'success': False, 'error': 'Replication failed'}
                     
                     channel.close()
             except Exception as e:
+                results[node_id] = {'success': False, 'error': str(e)}
+        
+        # Replicate in parallel using threads
+        results = {}
+        threads = []
+        
+        for node_id in preference_list:
+            t = threading.Thread(
+                target=replicate_to_node,
+                args=(node_id, results),
+                daemon=True
+            )
+            threads.append(t)
+            t.start()
+        
+        # Wait for all threads to complete (with single timeout for all)
+        start_wait = time.time()
+        for t in threads:
+            remaining_timeout = max(0.15 - (time.time() - start_wait), 0)
+            t.join(timeout=remaining_timeout)  # Share timeout across all threads
+        
+        # Count successes and failures
+        for node_id in preference_list:
+            if node_id in results:
+                if results[node_id]['success']:
+                    success_count += 1
+                    if node_id != self.node_id:
+                        print(f"  ✓ Replicated to {node_id}")
+                else:
+                    failed_nodes.append(node_id)
+                    print(f"  ✗ Failed to replicate to {node_id}: {results[node_id]['error']}")
+            else:
+                # Thread didn't complete in time
                 failed_nodes.append(node_id)
-                print(f"  ✗ Error replicating to node {node_id}: {e}")
+                print(f"  ✗ Timeout replicating to {node_id}")
         
         # Hinted Handoff: Store hints for failed nodes
         if failed_nodes and success_count >= self.W:
@@ -741,7 +759,7 @@ class Node:
                 request.context.CopyFrom(vc_proto)
             
             # Forward to coordinator via CoordinatePut RPC
-            response = stub.CoordinatePut(request, timeout=1)  # Fast timeout for quick failover
+            response = stub.CoordinatePut(request, timeout=0.3)  # Fast fail for dead coordinators
             
             channel.close()
             
@@ -856,12 +874,11 @@ class Node:
                 })
         
         # Check read quorum (need R successful responses)
-        # Check read quorum (need R successful responses)
         successful_responses = [r for r in all_responses if r['found']]
         if len(successful_responses) < self.R:
             print(f"  ✗ Read quorum failed: {len(successful_responses)}/{self.R}")
             
-            # STILL trigger read repair to fix missing replicas (even though quorum failed)
+            # STILL trigger read repair to fix missing replicas!
             if successful_responses:
                 all_versions = []
                 for response in successful_responses:
@@ -878,7 +895,7 @@ class Node:
                 
                 resolved = resolve_conflicts(deduplicated)
                 
-                # Trigger read repair asynchronously (even though quorum failed)
+                # Trigger read repair (even though quorum failed)
                 if resolved:
                     print(f"  [READ REPAIR] Triggering repair despite quorum failure")
                     threading.Thread(
@@ -903,8 +920,35 @@ class Node:
                 seen[key_tuple] = True
                 deduplicated.append(v)
         
+        # Additional deduplication: If multiple versions have same VALUE but different VCs,
+        # and those VCs are concurrent, keep only one (they're semantically identical)
+        value_groups = {}
+        for v in deduplicated:
+            if v.value not in value_groups:
+                value_groups[v.value] = []
+            value_groups[v.value].append(v)
+        
+        final_deduplicated = []
+        for value, versions in value_groups.items():
+            if len(versions) == 1:
+                # Only one version with this value
+                final_deduplicated.append(versions[0])
+            else:
+                # Multiple versions with same value - check if any dominates
+                dominated = set()
+                for i, v1 in enumerate(versions):
+                    for j, v2 in enumerate(versions):
+                        if i != j and self.vclock_dominates(v1.vector_clock, v2.vector_clock):
+                            dominated.add(j)
+                
+                # Keep non-dominated versions
+                for i, v in enumerate(versions):
+                    if i not in dominated:
+                        final_deduplicated.append(v)
+                        break  # Only keep first non-dominated with this value
+        
         # Resolve conflicts (remove dominated versions)
-        resolved = resolve_conflicts(deduplicated)
+        resolved = resolve_conflicts(final_deduplicated)
         
         if len(resolved) > 1:
             print(f"  ⚠ CONFLICT DETECTED: {len(resolved)} concurrent versions!")
